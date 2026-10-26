@@ -1,4 +1,3 @@
-import JSZip from 'jszip';
 import { getSupabaseClient, STORAGE_BUCKET } from './supabase';
 import {
   Assignment,
@@ -438,8 +437,7 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
 
 /**
  * Download All C Files:
- * - If 1 file: downloads directly as filename.c
- * - If multiple files: bundles all C files into a single ZIP archive and downloads automatically.
+ * Downloads each C file directly as its own individual .c file.
  */
 export async function downloadAllCFiles(assignment: Assignment): Promise<void> {
   const cFiles = getAssignmentCFiles(assignment);
@@ -447,49 +445,26 @@ export async function downloadAllCFiles(assignment: Assignment): Promise<void> {
     throw new Error('This assignment does not contain any C source code files.');
   }
 
-  // Single C file: download directly
-  if (cFiles.length === 1) {
-    const single = cFiles[0];
-    const blob = new Blob([single.code], { type: 'text/plain;charset=utf-8' });
+  for (let i = 0; i < cFiles.length; i++) {
+    const file = cFiles[i];
+    const blob = new Blob([file.code], { type: 'text/plain;charset=utf-8' });
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = single.name.endsWith('.c') ? single.name : `${single.name}.c`;
+    link.download = file.name.endsWith('.c') ? file.name : `${file.name}.c`;
     document.body.appendChild(link);
     link.click();
+
     setTimeout(() => {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(downloadUrl);
-    }, 200);
-    return;
+    }, 400);
+
+    // Stagger slightly so the browser handles each separate file download
+    if (i < cFiles.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
-
-  // Multiple C files: bundle into a ZIP archive using JSZip
-  const zip = new JSZip();
-  cFiles.forEach((file) => {
-    const cleanName = file.name.endsWith('.c') ? file.name : `${file.name}.c`;
-    zip.file(cleanName, file.code);
-  });
-
-  const zipBlob = await zip.generateAsync({ type: 'blob' });
-  const downloadUrl = window.URL.createObjectURL(zipBlob);
-  const link = document.createElement('a');
-  link.href = downloadUrl;
-
-  const safeTitle = assignment.title
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '_')
-    .replace(/^_+|_+$/g, '') || 'assignment';
-
-  link.download = `${safeTitle}_c_files.zip`;
-  document.body.appendChild(link);
-  link.click();
-
-  setTimeout(() => {
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(downloadUrl);
-  }, 200);
 }
 
 /**

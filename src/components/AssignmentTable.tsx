@@ -289,7 +289,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                                 onClick={() => handleDownloadCFiles(assignment)}
                                 disabled={isDownloadingC}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors disabled:opacity-50"
-                                title={cFiles.length === 1 ? `Download ${cFiles[0].name}` : `Download All (${cFiles.length} C files bundled in ZIP)`}
+                                title={cFiles.length === 1 ? `Download ${cFiles[0].name}` : `Download all ${cFiles.length} separate .c files`}
                               >
                                 {isDownloadingC ? (
                                   <Loader2 className="w-3 h-3 animate-spin" />
