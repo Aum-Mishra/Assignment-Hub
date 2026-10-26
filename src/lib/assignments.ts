@@ -202,7 +202,7 @@ export async function uploadAssignment(
 export async function deleteAssignment(id: number, secretToken: string): Promise<void> {
   const supabase = getSupabaseClient();
 
-  const { error } = await supabase.rpc('delete_assignment', {
+  const { data, error } = await supabase.rpc('delete_assignment', {
     p_id: id,
     p_secret_token: secretToken.trim(),
   });
@@ -210,6 +210,16 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
   if (error) {
     console.error('Delete assignment RPC error:', error);
     throw new Error(error.message || 'Unauthorized or invalid deletion key.');
+  }
+
+  // Use the official Supabase Storage API to remove the file
+  const filePath = (data as { file_path?: string })?.file_path;
+  if (filePath) {
+    try {
+      await supabase.storage.from(STORAGE_BUCKET).remove([filePath]);
+    } catch (storageErr) {
+      console.warn('Storage removal warning:', storageErr);
+    }
   }
 
   // Remove local token once deleted

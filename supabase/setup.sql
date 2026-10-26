@@ -2,11 +2,11 @@
 -- Assignment Hub — Complete Supabase Database & Storage Setup
 -- ==============================================================================
 -- Features:
--- 1. Public assignments catalogue with high performance indexes.
+-- 1. Public assignments catalogue with high-performance indexes.
 -- 2. Secure anonymous ownership: Private secrets table with SHA-256 hash.
--- 3. Secure deletion RPC: Only the original uploader possessing the secret
---    token can delete their assignment. Removes both DB record and storage file.
--- 4. Storage configuration for public download and restricted upload.
+-- 3. Secure deletion RPC: Validates uploader secret before removing DB record
+--    and returning file_path for cleanup via the Supabase Storage API.
+-- 4. Configures public download, upload, and delete policies for Supabase Storage.
 -- ==============================================================================
 
 -- 1. Enable required PostgreSQL extensions
@@ -55,14 +55,14 @@ DROP POLICY IF EXISTS "Anyone can insert assignment metadata" ON public.assignme
 DROP POLICY IF EXISTS "Deny direct public delete" ON public.assignments;
 DROP POLICY IF EXISTS "Deny direct public update" ON public.assignments;
 
--- Allow anyone (anonymous or authenticated) to read assignment catalogue
+-- Allow anyone to read assignments
 CREATE POLICY "Public assignments are viewable by anyone"
     ON public.assignments
     FOR SELECT
     TO anon, authenticated
     USING (true);
 
--- Allow public insert via direct table insert if needed, but our application uses create_assignment RPC
+-- Allow public insert via create_assignment RPC or direct insert
 CREATE POLICY "Anyone can insert assignment metadata"
     ON public.assignments
     FOR INSERT
@@ -77,7 +77,7 @@ CREATE POLICY "Anyone can insert assignment metadata"
     );
 
 -- NOTE: No UPDATE or DELETE policies are created on public.assignments.
--- Direct REST API UPDATE or DELETE requests are universally blocked by RLS.
+-- Direct REST API UPDATE or DELETE requests are blocked by RLS.
 -- Deletions MUST go through the delete_assignment() RPC function with token verification.
 
 -- 6. Row Level Security on private assignment_secrets table
@@ -139,14 +139,15 @@ END;
 $$;
 
 -- 8. Secure Stored Procedure: delete_assignment
--- Verifies uploader secret token, removes file from storage.objects, and deletes assignment record.
+-- Verifies uploader secret token, deletes DB record, and returns file_path
+-- so the frontend can delete the file via the official Supabase Storage API.
 CREATE OR REPLACE FUNCTION public.delete_assignment(
     p_id BIGINT,
     p_secret_token TEXT
 ) RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, extensions, storage
+SET search_path = public, extensions
 AS $$
 DECLARE
     v_hash TEXT;
@@ -169,17 +170,10 @@ BEGIN
         RAISE EXCEPTION 'Unauthorized: Invalid deletion token for this assignment';
     END IF;
 
-    -- Get file path for storage cleanup
+    -- Get file path before deleting record
     SELECT file_path INTO v_file_path
     FROM public.assignments
     WHERE id = p_id;
-
-    -- Delete file from storage.objects if it exists
-    IF v_file_path IS NOT NULL THEN
-        DELETE FROM storage.objects
-        WHERE bucket_id = 'assignments'
-          AND (name = v_file_path OR name = regexp_replace(v_file_path, '^assignments/', ''));
-    END IF;
 
     -- Delete assignment record (cascades to assignment_secrets)
     DELETE FROM public.assignments
@@ -220,6 +214,7 @@ ON CONFLICT (id) DO UPDATE SET
 -- Storage object policies
 DROP POLICY IF EXISTS "Assignment files are publicly readable" ON storage.objects;
 DROP POLICY IF EXISTS "Anyone can upload assignment files" ON storage.objects;
+DROP POLICY IF EXISTS "Anyone can delete assignment files" ON storage.objects;
 
 -- Allow anyone to download/read assignment files
 CREATE POLICY "Assignment files are publicly readable"
@@ -238,5 +233,9 @@ CREATE POLICY "Anyone can upload assignment files"
         (storage.extension(name) = 'zip' OR name LIKE '%.zip')
     );
 
--- NOTE: Direct anonymous DELETE on storage.objects is NOT permitted.
--- Deletion is performed exclusively through the verified delete_assignment() RPC function.
+-- Allow deletion of objects in the assignments bucket via the Supabase Storage API
+CREATE POLICY "Anyone can delete assignment files"
+    ON storage.objects
+    FOR DELETE
+    TO anon, authenticated
+    USING (bucket_id = 'assignments');
