@@ -77,14 +77,14 @@ export async function getAssignments(
   if (page === 1 && !searchQuery) {
     try {
       await supabase.rpc('clean_orphaned_assignments');
-    } catch (e) {
+    } catch {
       // Non-blocking if function not yet applied
     }
   }
 
   let query = supabase
     .from('assignments')
-    .select('id, title, file_path, file_name, file_size, created_at', { count: 'exact' })
+    .select('id, title, file_path, file_name, file_size, c_code, created_at', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(from, to);
 
@@ -126,74 +126,96 @@ export async function getAssignments(
 
 /**
  * Upload an assignment:
- * 1. Validates title & ZIP archive.
- * 2. Generates a secure random 32-character uploader secret token.
- * 3. Uploads ZIP file to Supabase Storage.
- * 4. Calls create_assignment RPC function to store metadata & SHA-256 hash.
- * 5. Saves deletion token in browser localStorage for 1-click verified deletion.
+ * Accepts:
+ * - title (required)
+ * - file (optional ZIP archive)
+ * - cCode (optional C source code)
+ * At least one of file or cCode must be provided.
  */
 export async function uploadAssignment(
   title: string,
-  file: File
+  file?: File | null,
+  cCode?: string | null
 ): Promise<UploadAssignmentResult> {
   const titleValidation = validateTitle(title);
   if (!titleValidation.valid) {
     throw new Error(titleValidation.error || 'Invalid title');
   }
 
-  const fileValidation = await validateZipFile(file);
-  if (!fileValidation.valid) {
-    throw new Error(fileValidation.error || 'Invalid file');
+  const cleanCCode = cCode?.trim() || null;
+  const hasFile = Boolean(file);
+  const hasCCode = Boolean(cleanCCode && cleanCCode.length > 0);
+
+  if (!hasFile && !hasCCode) {
+    throw new Error('Please provide either a ZIP file, C source code, or both.');
+  }
+
+  let storageFilePath: string | null = null;
+  let fileName: string | null = null;
+  let fileSize: number | null = null;
+
+  if (file) {
+    const fileValidation = await validateZipFile(file);
+    if (!fileValidation.valid) {
+      throw new Error(fileValidation.error || 'Invalid file');
+    }
+    const uniqueId = generateSecureToken().slice(0, 16);
+    const timestamp = Date.now();
+    storageFilePath = `assignments/${uniqueId}-${timestamp}.zip`;
+    fileName = file.name;
+    fileSize = file.size;
   }
 
   const supabase = getSupabaseClient();
-  const uniqueId = generateSecureToken().slice(0, 16);
-  const timestamp = Date.now();
-  const storageFilePath = `assignments/${uniqueId}-${timestamp}.zip`;
   const secretToken = generateSecureToken();
 
-  // Upload ZIP file to Supabase Storage
-  const { error: storageError } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storageFilePath, file, {
-      contentType: 'application/zip',
-      cacheControl: '3600',
-      upsert: false,
-    });
+  // If ZIP file provided, upload to Supabase Storage
+  if (file && storageFilePath) {
+    const { error: storageError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(storageFilePath, file, {
+        contentType: 'application/zip',
+        cacheControl: '3600',
+        upsert: false,
+      });
 
-  if (storageError) {
-    console.error('Supabase Storage upload error:', storageError);
-    if (storageError.message.includes('Bucket not found')) {
-      throw new Error(
-        `Storage bucket "${STORAGE_BUCKET}" does not exist. Please run setup.sql in the Supabase SQL Editor.`
-      );
+    if (storageError) {
+      console.error('Supabase Storage upload error:', storageError);
+      if (storageError.message.includes('Bucket not found')) {
+        throw new Error(
+          `Storage bucket "${STORAGE_BUCKET}" does not exist. Please run setup.sql in the Supabase SQL Editor.`
+        );
+      }
+      throw new Error(`Storage upload failed: ${storageError.message}`);
     }
-    throw new Error(`Storage upload failed: ${storageError.message}`);
   }
 
   // Register assignment metadata and hash secret via secure RPC
   const { data: rpcData, error: rpcError } = await supabase.rpc('create_assignment', {
     p_title: title.trim(),
     p_file_path: storageFilePath,
-    p_file_name: file.name,
-    p_file_size: file.size,
+    p_file_name: fileName,
+    p_file_size: fileSize,
+    p_c_code: cleanCCode,
     p_secret_token: secretToken,
   });
 
   if (rpcError) {
     console.error('create_assignment RPC error:', rpcError);
-    // Cleanup orphaned storage file
-    try {
-      await supabase.storage.from(STORAGE_BUCKET).remove([storageFilePath]);
-    } catch (cleanupErr) {
-      console.warn('Storage cleanup warning:', cleanupErr);
+    // Cleanup orphaned storage file if it was uploaded
+    if (storageFilePath) {
+      try {
+        await supabase.storage.from(STORAGE_BUCKET).remove([storageFilePath]);
+      } catch (cleanupErr) {
+        console.warn('Storage cleanup warning:', cleanupErr);
+      }
     }
     throw new Error(`Failed to save assignment record: ${rpcError.message}`);
   }
 
   const assignment = rpcData as Assignment;
 
-  // Save the deletion token in local storage so the original uploader can delete it seamlessly
+  // Save deletion token in local storage
   saveUploaderToken(assignment.id, secretToken);
 
   return {
@@ -206,7 +228,7 @@ export async function uploadAssignment(
  * Delete an assignment securely:
  * Calls delete_assignment RPC. The database hashes the provided secret_token
  * and verifies it against the private assignment_secrets table before deleting
- * the storage object and database record.
+ * the database record. If a ZIP file existed, removes it from Supabase Storage.
  */
 export async function deleteAssignment(id: number, secretToken: string): Promise<void> {
   const supabase = getSupabaseClient();
@@ -221,7 +243,7 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
     throw new Error(error.message || 'Unauthorized or invalid deletion key.');
   }
 
-  // Use the official Supabase Storage API to remove the file
+  // If a ZIP file was associated with this assignment, remove it from storage
   const filePath = (data as { file_path?: string })?.file_path;
   if (filePath) {
     const normalized = filePath.replace(/^assignments\//, '');
@@ -288,7 +310,7 @@ export async function renameAssignment(
     .from('assignments')
     .update(payload)
     .eq('id', id)
-    .select('id, title, file_path, file_name, file_size, created_at')
+    .select('id, title, file_path, file_name, file_size, c_code, created_at')
     .single();
 
   if (error) {
@@ -300,13 +322,13 @@ export async function renameAssignment(
 }
 
 /**
- * Download an assignment ZIP file.
+ * Download an assignment ZIP file from Supabase Storage.
  */
 export async function downloadAssignment(assignment: Assignment): Promise<void> {
   const supabase = getSupabaseClient();
 
   if (!assignment.file_path || !assignment.file_path.startsWith('assignments/')) {
-    throw new Error('Invalid or unverified file path for this assignment.');
+    throw new Error('This assignment does not have a ZIP archive available for download.');
   }
 
   const { data } = supabase.storage
@@ -327,9 +349,8 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = assignment.file_name.endsWith('.zip')
-      ? assignment.file_name
-      : `${assignment.file_name}.zip`;
+    const downloadName = assignment.file_name || 'assignment.zip';
+    link.download = downloadName.endsWith('.zip') ? downloadName : `${downloadName}.zip`;
     document.body.appendChild(link);
     link.click();
 
@@ -342,7 +363,7 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
     if (data.publicUrl) {
       const fallbackLink = document.createElement('a');
       fallbackLink.href = data.publicUrl;
-      fallbackLink.download = assignment.file_name;
+      fallbackLink.download = assignment.file_name || 'assignment.zip';
       document.body.appendChild(fallbackLink);
       fallbackLink.click();
       document.body.removeChild(fallbackLink);
@@ -352,4 +373,35 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
       err instanceof Error ? err.message : 'Could not download assignment file.'
     );
   }
+}
+
+/**
+ * Download C source code as a .c file, preserving line breaks, indentation, and formatting.
+ * Uses a meaningful filename derived from assignment title (e.g. linked_list.c).
+ */
+export function downloadCCode(assignment: Assignment): void {
+  if (!assignment.c_code) {
+    throw new Error('This assignment does not have C source code available.');
+  }
+
+  const blob = new Blob([assignment.c_code], { type: 'text/plain;charset=utf-8' });
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = downloadUrl;
+
+  // Sanitize title to create a readable filename like "socket_programming.c"
+  const safeBaseName = assignment.title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'source_code';
+
+  link.download = `${safeBaseName}.c`;
+  document.body.appendChild(link);
+  link.click();
+
+  setTimeout(() => {
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(downloadUrl);
+  }, 200);
 }

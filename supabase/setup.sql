@@ -2,13 +2,13 @@
 -- Assignment Hub — Complete Supabase Database & Storage Setup
 -- ==============================================================================
 -- Features:
--- 1. Public assignments catalogue with high-performance indexes.
--- 2. Secure anonymous ownership: Private secrets table with SHA-256 hash.
--- 3. Secure deletion RPC: Validates uploader secret before removing DB record
+-- 1. Dual resource sharing: ZIP archives, C source code (.c), or both.
+-- 2. Public assignments catalogue with high-performance indexes.
+-- 3. Secure anonymous ownership: Private secrets table with SHA-256 hash.
+-- 4. Secure deletion RPC: Validates uploader secret before removing DB record
 --    and returning file_path for cleanup via the Supabase Storage API.
--- 4. Renaming support: Allows renaming title and filename on any assignment.
--- 5. Orphaned file cleanup: Automatically removes database records if a ZIP
---    file was deleted from Supabase Storage.
+-- 5. Safe orphaned file cleanup: Cleans orphaned storage records while
+--    protecting pure C-code submissions.
 -- 6. Configures public download, upload, and delete policies for Supabase Storage.
 -- ==============================================================================
 
@@ -16,21 +16,53 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- 2. Create the assignments table
+-- 2. Create the assignments table supporting ZIP files, C source code, or both
 CREATE TABLE IF NOT EXISTS public.assignments (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     title TEXT NOT NULL,
-    file_path TEXT NOT NULL UNIQUE,
-    file_name TEXT NOT NULL,
-    file_size BIGINT NOT NULL,
+    file_path TEXT UNIQUE,       -- Nullable if only C code is uploaded
+    file_name TEXT,              -- Original ZIP filename (nullable)
+    file_size BIGINT,            -- ZIP file size in bytes (nullable)
+    c_code TEXT,                 -- Full C source code text (nullable)
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
 
-    -- Constraints enforcing valid metadata
+    -- Constraints
     CONSTRAINT title_length_check CHECK (char_length(trim(title)) >= 1 AND char_length(trim(title)) <= 150),
-    CONSTRAINT file_size_positive CHECK (file_size > 0),
-    CONSTRAINT file_name_not_empty CHECK (char_length(trim(file_name)) > 0),
-    CONSTRAINT file_path_not_empty CHECK (char_length(trim(file_path)) > 0)
+    CONSTRAINT file_size_positive CHECK (file_size IS NULL OR file_size > 0),
+    CONSTRAINT at_least_one_content CHECK (
+        file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0)
+    )
 );
+
+-- If table already exists without c_code or with NOT NULL file constraints, alter them safely:
+DO $$
+BEGIN
+    -- Add c_code column if not exists
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'assignments' AND column_name = 'c_code'
+    ) THEN
+        ALTER TABLE public.assignments ADD COLUMN c_code TEXT;
+    END IF;
+
+    -- Make file_path, file_name, file_size nullable if they were previously NOT NULL
+    ALTER TABLE public.assignments ALTER COLUMN file_path DROP NOT NULL;
+    ALTER TABLE public.assignments ALTER COLUMN file_name DROP NOT NULL;
+    ALTER TABLE public.assignments ALTER COLUMN file_size DROP NOT NULL;
+
+    -- Drop older constraints if they existed
+    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_name_not_empty;
+    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_path_not_empty;
+    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS at_least_one_content;
+    
+    -- Re-add at_least_one_content constraint
+    ALTER TABLE public.assignments ADD CONSTRAINT at_least_one_content CHECK (
+        file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0)
+    );
+EXCEPTION WHEN OTHERS THEN
+    -- Ignore alteration conflicts on fresh databases
+    NULL;
+END $$;
 
 -- 3. Create private secrets table for secure anonymous ownership verification
 -- IMPORTANT: This table is NEVER exposed to public read queries.
@@ -73,10 +105,7 @@ CREATE POLICY "Anyone can insert assignment metadata"
     WITH CHECK (
         char_length(trim(title)) >= 1 AND
         char_length(trim(title)) <= 150 AND
-        file_size > 0 AND
-        file_size <= 26214400 AND
-        char_length(trim(file_name)) > 0 AND
-        file_path LIKE 'assignments/%'
+        (file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0))
     );
 
 -- Allow renaming titles and filenames
@@ -87,21 +116,21 @@ CREATE POLICY "Anyone can update assignment metadata"
     USING (true)
     WITH CHECK (
         char_length(trim(title)) >= 1 AND
-        char_length(trim(title)) <= 150 AND
-        char_length(trim(file_name)) > 0
+        char_length(trim(title)) <= 150
     );
 
 -- 6. Row Level Security on private assignment_secrets table
 ALTER TABLE public.assignment_secrets ENABLE ROW LEVEL SECURITY;
 
 -- 7. Secure Stored Procedure: create_assignment
--- Stores assignment metadata and registers the SHA-256 hash of the deletion secret.
+-- Stores assignment metadata (ZIP details, C source code, or both) and registers SHA-256 secret.
 CREATE OR REPLACE FUNCTION public.create_assignment(
     p_title TEXT,
-    p_file_path TEXT,
-    p_file_name TEXT,
-    p_file_size BIGINT,
-    p_secret_token TEXT
+    p_file_path TEXT DEFAULT NULL,
+    p_file_name TEXT DEFAULT NULL,
+    p_file_size BIGINT DEFAULT NULL,
+    p_c_code TEXT DEFAULT NULL,
+    p_secret_token TEXT DEFAULT NULL
 ) RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -110,20 +139,30 @@ AS $$
 DECLARE
     v_assignment public.assignments%ROWTYPE;
     v_hash TEXT;
+    v_clean_c_code TEXT;
+    v_clean_title TEXT;
 BEGIN
-    -- Validate title
-    IF char_length(trim(p_title)) < 1 OR char_length(trim(p_title)) > 150 THEN
+    v_clean_title := trim(p_title);
+    IF char_length(v_clean_title) < 1 OR char_length(v_clean_title) > 150 THEN
         RAISE EXCEPTION 'Title must be between 1 and 150 characters';
     END IF;
 
-    -- Validate file size (max 25MB)
-    IF p_file_size <= 0 OR p_file_size > 26214400 THEN
-        RAISE EXCEPTION 'File size must be between 1 byte and 25 MB';
+    -- Clean C code
+    v_clean_c_code := NULLIF(trim(p_c_code), '');
+
+    -- Verify that at least one form of content is provided
+    IF (p_file_path IS NULL OR char_length(trim(p_file_path)) = 0) AND v_clean_c_code IS NULL THEN
+        RAISE EXCEPTION 'Please provide either a ZIP file, C source code, or both';
     END IF;
 
-    -- Validate path
-    IF p_file_path NOT LIKE 'assignments/%' THEN
-        RAISE EXCEPTION 'Invalid file storage path';
+    -- Validate ZIP file parameters if provided
+    IF p_file_path IS NOT NULL AND char_length(trim(p_file_path)) > 0 THEN
+        IF p_file_path NOT LIKE 'assignments/%' THEN
+            RAISE EXCEPTION 'Invalid file storage path';
+        END IF;
+        IF p_file_size IS NOT NULL AND (p_file_size <= 0 OR p_file_size > 26214400) THEN
+            RAISE EXCEPTION 'ZIP file size must be between 1 byte and 25 MB';
+        END IF;
     END IF;
 
     -- Validate deletion token
@@ -134,9 +173,21 @@ BEGIN
     -- Compute SHA-256 hash of the uploader secret token
     v_hash := encode(digest(trim(p_secret_token), 'sha256'), 'hex');
 
-    -- Insert public assignment record
-    INSERT INTO public.assignments (title, file_path, file_name, file_size)
-    VALUES (trim(p_title), p_file_path, p_file_name, p_file_size)
+    -- Insert assignment record
+    INSERT INTO public.assignments (
+        title,
+        file_path,
+        file_name,
+        file_size,
+        c_code
+    )
+    VALUES (
+        v_clean_title,
+        NULLIF(trim(p_file_path), ''),
+        NULLIF(trim(p_file_name), ''),
+        p_file_size,
+        v_clean_c_code
+    )
     RETURNING * INTO v_assignment;
 
     -- Insert into private secrets table
@@ -149,7 +200,7 @@ $$;
 
 -- 8. Secure Stored Procedure: delete_assignment
 -- Verifies uploader secret token, deletes DB record, and returns file_path
--- so the frontend can delete the file via the official Supabase Storage API.
+-- so the frontend can delete the ZIP from storage if it existed.
 CREATE OR REPLACE FUNCTION public.delete_assignment(
     p_id BIGINT,
     p_secret_token TEXT
@@ -197,7 +248,6 @@ END;
 $$;
 
 -- 9. Stored Procedure: rename_assignment
--- Allows renaming an assignment's title and/or ZIP filename.
 CREATE OR REPLACE FUNCTION public.rename_assignment(
     p_id BIGINT,
     p_new_title TEXT,
@@ -238,7 +288,9 @@ BEGIN
 END;
 $$;
 
--- 10. Automatic Cleanup of Orphaned Assignments
+-- 10. Automatic Cleanup of Orphaned ZIP Assignments
+-- Only cleans assignments that had a ZIP file (file_path IS NOT NULL) which is missing from storage.
+-- Pure C-code assignments (file_path IS NULL) are safely protected!
 CREATE OR REPLACE FUNCTION public.clean_orphaned_assignments()
 RETURNS void
 LANGUAGE plpgsql
@@ -247,7 +299,8 @@ SET search_path = public, storage
 AS $$
 BEGIN
     DELETE FROM public.assignments
-    WHERE file_path NOT IN (
+    WHERE file_path IS NOT NULL
+      AND file_path NOT IN (
         SELECT name FROM storage.objects WHERE bucket_id = 'assignments'
         UNION
         SELECT 'assignments/' || name FROM storage.objects WHERE bucket_id = 'assignments'
@@ -258,7 +311,7 @@ $$;
 -- Grant permissions on tables and RPC functions
 GRANT SELECT, INSERT, UPDATE ON public.assignments TO anon, authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_assignment(BIGINT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.rename_assignment(BIGINT, TEXT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.clean_orphaned_assignments() TO anon, authenticated;
@@ -267,7 +320,6 @@ GRANT EXECUTE ON FUNCTION public.clean_orphaned_assignments() TO anon, authentic
 -- 11. Storage Bucket Configuration & Storage Policies
 -- ==============================================================================
 
--- Create or update the 'assignments' public bucket
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
     'assignments',
@@ -281,19 +333,16 @@ ON CONFLICT (id) DO UPDATE SET
     file_size_limit = 26214400,
     allowed_mime_types = ARRAY['application/zip', 'application/x-zip-compressed', 'multipart/x-zip', 'application/x-zip', 'application/octet-stream'];
 
--- Storage object policies
 DROP POLICY IF EXISTS "Assignment files are publicly readable" ON storage.objects;
 DROP POLICY IF EXISTS "Anyone can upload assignment files" ON storage.objects;
 DROP POLICY IF EXISTS "Anyone can delete assignment files" ON storage.objects;
 
--- Allow anyone to download/read assignment files
 CREATE POLICY "Assignment files are publicly readable"
     ON storage.objects
     FOR SELECT
     TO anon, authenticated
     USING (bucket_id = 'assignments');
 
--- Allow anyone to upload objects into the assignments bucket
 CREATE POLICY "Anyone can upload assignment files"
     ON storage.objects
     FOR INSERT
@@ -303,12 +352,11 @@ CREATE POLICY "Anyone can upload assignment files"
         (storage.extension(name) = 'zip' OR name LIKE '%.zip')
     );
 
--- Allow deletion of objects in the assignments bucket via the Supabase Storage API
 CREATE POLICY "Anyone can delete assignment files"
     ON storage.objects
     FOR DELETE
     TO anon, authenticated
     USING (bucket_id = 'assignments');
 
--- Run immediate cleanup of any existing orphaned rows right now
+-- Run safe immediate cleanup
 SELECT public.clean_orphaned_assignments();

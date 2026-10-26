@@ -1,9 +1,10 @@
 export interface Assignment {
   id: number;
   title: string;
-  file_path: string;
-  file_name: string;
-  file_size: number;
+  file_path: string | null;
+  file_name: string | null;
+  file_size: number | null;
+  c_code: string | null;
   created_at: string;
 }
 

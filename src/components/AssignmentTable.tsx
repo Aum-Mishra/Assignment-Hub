@@ -6,14 +6,14 @@ import {
   Search,
   X,
   FileArchive,
+  Code2,
   Loader2,
   RotateCcw,
-  Calendar,
-  HardDrive
+  Calendar
 } from 'lucide-react';
 import { Assignment } from '../types/assignment';
 import { formatBytes } from '../lib/validation';
-import { downloadAssignment, getStoredTokens } from '../lib/assignments';
+import { downloadAssignment, downloadCCode, getStoredTokens } from '../lib/assignments';
 
 interface AssignmentTableProps {
   assignments: Assignment[];
@@ -46,18 +46,27 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
   onRetry,
   errorMessage,
 }) => {
-  const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const [downloadingZipId, setDownloadingZipId] = useState<number | null>(null);
   const myTokens = getStoredTokens();
 
-  const handleDownload = async (assignment: Assignment) => {
+  const handleDownloadZip = async (assignment: Assignment) => {
     try {
-      setDownloadingId(assignment.id);
+      setDownloadingZipId(assignment.id);
       await downloadAssignment(assignment);
     } catch (err) {
       console.error('Download error:', err);
-      alert(err instanceof Error ? err.message : 'Download failed.');
+      alert(err instanceof Error ? err.message : 'ZIP download failed.');
     } finally {
-      setDownloadingId(null);
+      setDownloadingZipId(null);
+    }
+  };
+
+  const handleDownloadC = (assignment: Assignment) => {
+    try {
+      downloadCCode(assignment);
+    } catch (err) {
+      console.error('C download error:', err);
+      alert(err instanceof Error ? err.message : 'C source download failed.');
     }
   };
 
@@ -124,7 +133,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
         </div>
       )}
 
-      {/* Main Table / List Container */}
+      {/* Main Table Container */}
       <div className="bg-white rounded-md border border-slate-200 overflow-hidden shadow-2xs">
         {isLoading && assignments.length === 0 ? (
           /* Skeletons */
@@ -148,7 +157,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
             <p className="text-xs text-slate-400 mt-1">
               {searchQuery
                 ? 'Try a different search term or clear the filter.'
-                : 'Click "Upload Assignment" in the top bar to share the first file.'}
+                : 'Click "Upload Assignment" in the top bar to share the first assignment.'}
             </p>
             {searchQuery && (
               <button
@@ -168,17 +177,18 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
-                    <th className="py-2.5 px-4 w-5/12">Assignment Title</th>
-                    <th className="py-2.5 px-3 w-3/12">ZIP Filename</th>
-                    <th className="py-2.5 px-3 w-1/12">Size</th>
-                    <th className="py-2.5 px-3 w-1/12">Date</th>
-                    <th className="py-2.5 px-4 w-2/12 text-right">Actions</th>
+                    <th className="py-2.5 px-4 w-4/12">Assignment Title</th>
+                    <th className="py-2.5 px-3 w-3/12">Available Files</th>
+                    <th className="py-2.5 px-3 w-2/12">Uploaded</th>
+                    <th className="py-2.5 px-4 w-3/12 text-right">Download & Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {assignments.map((assignment) => {
                     const isMine = Boolean(myTokens[assignment.id]);
-                    const isDownloading = downloadingId === assignment.id;
+                    const hasZip = Boolean(assignment.file_path);
+                    const hasC = Boolean(assignment.c_code && assignment.c_code.trim().length > 0);
+                    const isDownloadingZip = downloadingZipId === assignment.id;
 
                     return (
                       <tr
@@ -193,49 +203,75 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                               {assignment.title}
                             </span>
                             {isMine && (
-                              <span className="inline-block text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-200">
+                              <span className="inline-block text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
                                 Yours
                               </span>
                             )}
                           </div>
                         </td>
 
-                        {/* File Name */}
-                        <td className="py-2.5 px-3 font-mono text-slate-600 text-xs align-middle">
-                          <div className="flex items-center gap-1.5 truncate max-w-xs" title={assignment.file_name}>
-                            <FileArchive className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{assignment.file_name}</span>
+                        {/* Available File Indicators */}
+                        <td className="py-2.5 px-3 align-middle">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {hasZip && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-mono text-[11px]" title={assignment.file_name || 'ZIP Archive'}>
+                                <FileArchive className="w-3 h-3 text-blue-600" />
+                                <span>ZIP</span>
+                                {assignment.file_size ? (
+                                  <span className="text-slate-400">({formatBytes(assignment.file_size)})</span>
+                                ) : null}
+                              </span>
+                            )}
+
+                            {hasC && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-mono text-[11px]" title="C Source Code">
+                                <Code2 className="w-3 h-3 text-emerald-600" />
+                                <span>C Code (.c)</span>
+                              </span>
+                            )}
                           </div>
                         </td>
 
-                        {/* File Size */}
-                        <td className="py-2.5 px-3 text-slate-500 font-mono text-xs align-middle whitespace-nowrap">
-                          {formatBytes(assignment.file_size)}
-                        </td>
-
-                        {/* Upload Date */}
+                        {/* Date */}
                         <td className="py-2.5 px-3 text-slate-500 text-xs align-middle whitespace-nowrap">
                           {formatDate(assignment.created_at)}
                         </td>
 
-                        {/* Actions: Download + Delete */}
+                        {/* Actions */}
                         <td className="py-2.5 px-4 text-right align-middle whitespace-nowrap">
                           <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleDownload(assignment)}
-                              disabled={isDownloading}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors disabled:opacity-50"
-                              title="Download ZIP archive"
-                            >
-                              {isDownloading ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Download className="w-3 h-3" />
-                              )}
-                              <span>Download</span>
-                            </button>
+                            {/* Download ZIP button (only if ZIP exists) */}
+                            {hasZip && (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadZip(assignment)}
+                                disabled={isDownloadingZip}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors disabled:opacity-50"
+                                title="Download ZIP Archive"
+                              >
+                                {isDownloadingZip ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Download className="w-3 h-3" />
+                                )}
+                                <span>Download ZIP</span>
+                              </button>
+                            )}
 
+                            {/* Download C Code button (only if C Code exists) */}
+                            {hasC && (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadC(assignment)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors"
+                                title="Download C Source Code (.c)"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>Download C Code</span>
+                              </button>
+                            )}
+
+                            {/* Rename */}
                             <button
                               type="button"
                               onClick={() => onOpenRename(assignment)}
@@ -246,6 +282,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
 
+                            {/* Delete */}
                             <button
                               type="button"
                               onClick={() => onOpenDelete(assignment)}
@@ -264,11 +301,13 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
               </table>
             </div>
 
-            {/* Mobile Compact Rows */}
+            {/* Mobile Stacked Rows */}
             <div className="md:hidden divide-y divide-slate-100">
               {assignments.map((assignment) => {
                 const isMine = Boolean(myTokens[assignment.id]);
-                const isDownloading = downloadingId === assignment.id;
+                const hasZip = Boolean(assignment.file_path);
+                const hasC = Boolean(assignment.c_code && assignment.c_code.trim().length > 0);
+                const isDownloadingZip = downloadingZipId === assignment.id;
 
                 return (
                   <div
@@ -287,53 +326,76 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                      <span className="font-mono flex items-center gap-1 truncate max-w-[200px]" title={assignment.file_name}>
-                        <FileArchive className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="truncate">{assignment.file_name}</span>
-                      </span>
-                      <span className="flex items-center gap-1 font-mono">
-                        <HardDrive className="w-3 h-3 text-slate-400" />
-                        {formatBytes(assignment.file_size)}
-                      </span>
-                      <span className="flex items-center gap-1">
+                    {/* Metadata & Badges */}
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      {hasZip && (
+                        <span className="inline-flex items-center gap-1 font-mono text-[11px] bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                          <FileArchive className="w-3 h-3 text-blue-600" />
+                          <span>ZIP</span>
+                          {assignment.file_size ? <span>({formatBytes(assignment.file_size)})</span> : null}
+                        </span>
+                      )}
+
+                      {hasC && (
+                        <span className="inline-flex items-center gap-1 font-mono text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-800">
+                          <Code2 className="w-3 h-3 text-emerald-600" />
+                          <span>C Code</span>
+                        </span>
+                      )}
+
+                      <span className="flex items-center gap-1 text-[11px]">
                         <Calendar className="w-3 h-3 text-slate-400" />
                         {formatDate(assignment.created_at)}
                       </span>
                     </div>
 
-                    <div className="pt-1 flex items-center justify-between border-t border-slate-100">
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(assignment)}
-                        disabled={isDownloading}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded"
-                      >
-                        {isDownloading ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Download className="w-3.5 h-3.5" />
+                    {/* Actions */}
+                    <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {hasZip && (
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadZip(assignment)}
+                            disabled={isDownloadingZip}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded"
+                          >
+                            {isDownloadingZip ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Download className="w-3 h-3" />
+                            )}
+                            <span>Download ZIP</span>
+                          </button>
                         )}
-                        <span>Download ZIP</span>
-                      </button>
+
+                        {hasC && (
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadC(assignment)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>Download .c</span>
+                          </button>
+                        )}
+                      </div>
 
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
                           onClick={() => onOpenRename(assignment)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded"
+                          className="p-1 text-slate-400 hover:text-blue-600 rounded"
+                          aria-label="Rename"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
-                          <span>Rename</span>
                         </button>
-
                         <button
                           type="button"
                           onClick={() => onOpenDelete(assignment)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded"
+                          className="p-1 text-slate-400 hover:text-rose-600 rounded"
+                          aria-label="Delete"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                          <span>Delete</span>
                         </button>
                       </div>
                     </div>
@@ -345,7 +407,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
         )}
       </div>
 
-      {/* Load More Button */}
+      {/* Load More */}
       {hasMore && !isLoading && (
         <div className="pt-2 text-center">
           <button
@@ -368,4 +430,3 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
     </div>
   );
 };
-

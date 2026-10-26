@@ -24,7 +24,7 @@ export const RenameModal: React.FC<RenameModalProps> = ({
   useEffect(() => {
     if (assignment) {
       setTitle(assignment.title);
-      setFileName(assignment.file_name);
+      setFileName(assignment.file_name || '');
       setErrorMessage(null);
     }
   }, [assignment]);
@@ -146,3 +146,4 @@ export const RenameModal: React.FC<RenameModalProps> = ({
     </div>
   );
 };
+
