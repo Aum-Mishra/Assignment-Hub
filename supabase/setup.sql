@@ -258,3 +258,7 @@ CREATE POLICY "Anyone can delete assignment files"
 
 -- Run immediate cleanup of any existing orphaned rows right now
 SELECT public.clean_orphaned_assignments();
+
+-- Run immediate cleanup of any existing orphaned rows right now
+SELECT public.clean_orphaned_assignments();
+
