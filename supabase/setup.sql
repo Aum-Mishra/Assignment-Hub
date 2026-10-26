@@ -2,70 +2,56 @@
 -- Assignment Hub — Complete Supabase Database & Storage Setup
 -- ==============================================================================
 -- Features:
--- 1. Dual resource sharing: ZIP archives, C source code (.c), or both.
--- 2. Public assignments catalogue with high-performance indexes.
--- 3. Secure anonymous ownership: Private secrets table with SHA-256 hash.
--- 4. Secure deletion RPC: Validates uploader secret before removing DB record
---    and returning file_path for cleanup via the Supabase Storage API.
--- 5. Safe orphaned file cleanup: Cleans orphaned storage records while
---    protecting pure C-code submissions.
--- 6. Configures public download, upload, and delete policies for Supabase Storage.
+-- 1. Dual resource sharing: ZIP archives and Multiple named C source code files.
+-- 2. Stores multiple C files with filenames and complete code as JSONB.
+-- 3. Public assignments catalogue with high-performance indexes.
+-- 4. Secure anonymous ownership: Private secrets table with SHA-256 hash.
+-- 5. Secure deletion RPC: Validates uploader secret before removing DB record
+--    and removing the ZIP from Supabase Storage if present.
+-- 6. Safe orphaned file cleanup protecting C-code assignments.
+-- 7. Configures public download, upload, and delete policies for Supabase Storage.
 -- ==============================================================================
 
 -- 1. Enable required PostgreSQL extensions
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- 2. Create the assignments table supporting ZIP files, C source code, or both
+-- 2. Create or migrate the assignments table
 CREATE TABLE IF NOT EXISTS public.assignments (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     title TEXT NOT NULL,
-    file_path TEXT UNIQUE,       -- Nullable if only C code is uploaded
-    file_name TEXT,              -- Original ZIP filename (nullable)
-    file_size BIGINT,            -- ZIP file size in bytes (nullable)
-    c_code TEXT,                 -- Full C source code text (nullable)
-    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-
-    -- Constraints
-    CONSTRAINT title_length_check CHECK (char_length(trim(title)) >= 1 AND char_length(trim(title)) <= 150),
-    CONSTRAINT file_size_positive CHECK (file_size IS NULL OR file_size > 0),
-    CONSTRAINT at_least_one_content CHECK (
-        file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0)
-    )
+    file_path TEXT UNIQUE,                      -- Nullable if only C code is provided
+    file_name TEXT,                             -- Original ZIP filename (nullable)
+    file_size BIGINT,                           -- ZIP file size in bytes (nullable)
+    c_code TEXT,                                -- Legacy single C code text (nullable)
+    c_files JSONB DEFAULT '[]'::jsonb,          -- Multiple C code files [{name, code}]
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- If table already exists without c_code or with NOT NULL file constraints, alter them safely:
-DO $$
-BEGIN
-    -- Add c_code column if not exists
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = 'public' AND table_name = 'assignments' AND column_name = 'c_code'
-    ) THEN
-        ALTER TABLE public.assignments ADD COLUMN c_code TEXT;
-    END IF;
+-- Safely ensure columns and constraints exist for previously created tables
+ALTER TABLE public.assignments ADD COLUMN IF NOT EXISTS c_files JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE public.assignments ADD COLUMN IF NOT EXISTS c_code TEXT;
 
-    -- Make file_path, file_name, file_size nullable if they were previously NOT NULL
-    ALTER TABLE public.assignments ALTER COLUMN file_path DROP NOT NULL;
-    ALTER TABLE public.assignments ALTER COLUMN file_name DROP NOT NULL;
-    ALTER TABLE public.assignments ALTER COLUMN file_size DROP NOT NULL;
+-- Remove NOT NULL restrictions from ZIP columns to support C-code only uploads
+ALTER TABLE public.assignments ALTER COLUMN file_path DROP NOT NULL;
+ALTER TABLE public.assignments ALTER COLUMN file_name DROP NOT NULL;
+ALTER TABLE public.assignments ALTER COLUMN file_size DROP NOT NULL;
 
-    -- Drop older constraints if they existed
-    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_name_not_empty;
-    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_path_not_empty;
-    ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS at_least_one_content;
-    
-    -- Re-add at_least_one_content constraint
-    ALTER TABLE public.assignments ADD CONSTRAINT at_least_one_content CHECK (
-        file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0)
-    );
-EXCEPTION WHEN OTHERS THEN
-    -- Ignore alteration conflicts on fresh databases
-    NULL;
-END $$;
+-- Remove legacy constraints if present
+ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_name_not_empty;
+ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_path_not_empty;
+ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS at_least_one_content;
+ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS title_length_check;
+ALTER TABLE public.assignments DROP CONSTRAINT IF EXISTS file_size_positive;
+
+-- Re-apply modern constraints
+ALTER TABLE public.assignments ADD CONSTRAINT title_length_check
+    CHECK (char_length(trim(title)) >= 1 AND char_length(trim(title)) <= 150);
+
+ALTER TABLE public.assignments ADD CONSTRAINT file_size_positive
+    CHECK (file_size IS NULL OR file_size > 0);
 
 -- 3. Create private secrets table for secure anonymous ownership verification
--- IMPORTANT: This table is NEVER exposed to public read queries.
 CREATE TABLE IF NOT EXISTS public.assignment_secrets (
     assignment_id BIGINT PRIMARY KEY REFERENCES public.assignments(id) ON DELETE CASCADE,
     secret_hash TEXT NOT NULL,
@@ -97,15 +83,14 @@ CREATE POLICY "Public assignments are viewable by anyone"
     TO anon, authenticated
     USING (true);
 
--- Allow public insert via create_assignment RPC or direct insert
+-- Allow public insert
 CREATE POLICY "Anyone can insert assignment metadata"
     ON public.assignments
     FOR INSERT
     TO anon, authenticated
     WITH CHECK (
         char_length(trim(title)) >= 1 AND
-        char_length(trim(title)) <= 150 AND
-        (file_path IS NOT NULL OR (c_code IS NOT NULL AND char_length(trim(c_code)) > 0))
+        char_length(trim(title)) <= 150
     );
 
 -- Allow renaming titles and filenames
@@ -122,15 +107,21 @@ CREATE POLICY "Anyone can update assignment metadata"
 -- 6. Row Level Security on private assignment_secrets table
 ALTER TABLE public.assignment_secrets ENABLE ROW LEVEL SECURITY;
 
--- 7. Secure Stored Procedure: create_assignment
--- Stores assignment metadata (ZIP details, C source code, or both) and registers SHA-256 secret.
+-- 7. Drop previous overloads of create_assignment
+DROP FUNCTION IF EXISTS public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT);
+DROP FUNCTION IF EXISTS public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, JSONB);
+
+-- Stored Procedure: create_assignment
+-- Stores assignment metadata (ZIP details, multiple C files, or both) and registers SHA-256 secret.
 CREATE OR REPLACE FUNCTION public.create_assignment(
     p_title TEXT,
     p_file_path TEXT DEFAULT NULL,
     p_file_name TEXT DEFAULT NULL,
     p_file_size BIGINT DEFAULT NULL,
     p_c_code TEXT DEFAULT NULL,
-    p_secret_token TEXT DEFAULT NULL
+    p_secret_token TEXT DEFAULT NULL,
+    p_c_files JSONB DEFAULT '[]'::jsonb
 ) RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -139,23 +130,30 @@ AS $$
 DECLARE
     v_assignment public.assignments%ROWTYPE;
     v_hash TEXT;
-    v_clean_c_code TEXT;
     v_clean_title TEXT;
+    v_c_files JSONB;
+    v_c_files_count INT;
 BEGIN
     v_clean_title := trim(p_title);
     IF char_length(v_clean_title) < 1 OR char_length(v_clean_title) > 150 THEN
         RAISE EXCEPTION 'Title must be between 1 and 150 characters';
     END IF;
 
-    -- Clean C code
-    v_clean_c_code := NULLIF(trim(p_c_code), '');
+    -- Normalize C files JSON
+    v_c_files := COALESCE(p_c_files, '[]'::jsonb);
+    IF jsonb_typeof(v_c_files) <> 'array' THEN
+        v_c_files := '[]'::jsonb;
+    END IF;
+    v_c_files_count := jsonb_array_length(v_c_files);
 
-    -- Verify that at least one form of content is provided
-    IF (p_file_path IS NULL OR char_length(trim(p_file_path)) = 0) AND v_clean_c_code IS NULL THEN
-        RAISE EXCEPTION 'Please provide either a ZIP file, C source code, or both';
+    -- Ensure either ZIP file or C files are provided
+    IF (p_file_path IS NULL OR char_length(trim(p_file_path)) = 0)
+       AND v_c_files_count = 0
+       AND (p_c_code IS NULL OR char_length(trim(p_c_code)) = 0) THEN
+        RAISE EXCEPTION 'Please provide either a ZIP archive, at least one C code file, or both';
     END IF;
 
-    -- Validate ZIP file parameters if provided
+    -- Validate ZIP parameters if present
     IF p_file_path IS NOT NULL AND char_length(trim(p_file_path)) > 0 THEN
         IF p_file_path NOT LIKE 'assignments/%' THEN
             RAISE EXCEPTION 'Invalid file storage path';
@@ -170,7 +168,7 @@ BEGIN
         RAISE EXCEPTION 'A secure deletion secret of at least 16 characters is required';
     END IF;
 
-    -- Compute SHA-256 hash of the uploader secret token
+    -- Compute SHA-256 hash
     v_hash := encode(digest(trim(p_secret_token), 'sha256'), 'hex');
 
     -- Insert assignment record
@@ -179,14 +177,16 @@ BEGIN
         file_path,
         file_name,
         file_size,
-        c_code
+        c_code,
+        c_files
     )
     VALUES (
         v_clean_title,
         NULLIF(trim(p_file_path), ''),
         NULLIF(trim(p_file_name), ''),
         p_file_size,
-        v_clean_c_code
+        NULLIF(trim(p_c_code), ''),
+        v_c_files
     )
     RETURNING * INTO v_assignment;
 
@@ -198,9 +198,7 @@ BEGIN
 END;
 $$;
 
--- 8. Secure Stored Procedure: delete_assignment
--- Verifies uploader secret token, deletes DB record, and returns file_path
--- so the frontend can delete the ZIP from storage if it existed.
+-- 8. Stored Procedure: delete_assignment
 CREATE OR REPLACE FUNCTION public.delete_assignment(
     p_id BIGINT,
     p_secret_token TEXT
@@ -218,10 +216,8 @@ BEGIN
         RAISE EXCEPTION 'Deletion token is required';
     END IF;
 
-    -- Compute SHA-256 hash of provided token
     v_hash := encode(digest(trim(p_secret_token), 'sha256'), 'hex');
 
-    -- Retrieve stored secret hash
     SELECT secret_hash INTO v_stored_hash
     FROM public.assignment_secrets
     WHERE assignment_id = p_id;
@@ -230,12 +226,10 @@ BEGIN
         RAISE EXCEPTION 'Unauthorized: Invalid deletion token for this assignment';
     END IF;
 
-    -- Get file path before deleting record
     SELECT file_path INTO v_file_path
     FROM public.assignments
     WHERE id = p_id;
 
-    -- Delete assignment record (cascades to assignment_secrets)
     DELETE FROM public.assignments
     WHERE id = p_id;
 
@@ -311,7 +305,7 @@ $$;
 -- Grant permissions on tables and RPC functions
 GRANT SELECT, INSERT, UPDATE ON public.assignments TO anon, authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, JSONB) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_assignment(BIGINT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.rename_assignment(BIGINT, TEXT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.clean_orphaned_assignments() TO anon, authenticated;

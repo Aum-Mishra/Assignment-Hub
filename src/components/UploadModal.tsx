@@ -1,5 +1,16 @@
 import React, { useState, useRef, ChangeEvent, DragEvent } from 'react';
-import { X, Upload, FileArchive, Code2, Loader2, AlertCircle, Check, Copy } from 'lucide-react';
+import {
+  X,
+  Upload,
+  FileArchive,
+  Code2,
+  Plus,
+  Trash2,
+  Loader2,
+  AlertCircle,
+  Check,
+  Copy
+} from 'lucide-react';
 import { uploadAssignment } from '../lib/assignments';
 import {
   validateTitle,
@@ -7,12 +18,18 @@ import {
   formatBytes,
   MAX_FILE_SIZE_MB
 } from '../lib/validation';
-import { Assignment } from '../types/assignment';
+import { Assignment, CCodeFile } from '../types/assignment';
 
 interface UploadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onUploadSuccess: (newAssignment: Assignment) => void;
+}
+
+interface CFileDraft {
+  id: string;
+  name: string;
+  code: string;
 }
 
 export const UploadModal: React.FC<UploadModalProps> = ({
@@ -22,7 +39,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 }) => {
   const [title, setTitle] = useState('');
   const [file, setFile] = useState<File | null>(null);
-  const [cCode, setCCode] = useState('');
+  const [cFiles, setCFiles] = useState<CFileDraft[]>([
+    { id: '1', name: 'main.c', code: '' },
+  ]);
   const [activeTab, setActiveTab] = useState<'both' | 'zip' | 'c'>('both');
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -66,6 +85,34 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     }
   };
 
+  // C Files list management
+  const handleAddCFile = () => {
+    setCFiles((prev) => [
+      ...prev,
+      {
+        id: String(Date.now()),
+        name: `file_${prev.length + 1}.c`,
+        code: '',
+      },
+    ]);
+  };
+
+  const handleRemoveCFile = (id: string) => {
+    setCFiles((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const handleCFileNameChange = (id: string, newName: string) => {
+    setCFiles((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, name: newName } : item))
+    );
+  };
+
+  const handleCCodeChange = (id: string, newCode: string) => {
+    setCFiles((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, code: newCode } : item))
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -76,17 +123,31 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       return;
     }
 
+    // Filter C files that have non-empty code
+    const validCFiles: CCodeFile[] = cFiles
+      .filter((f) => f.code.trim().length > 0)
+      .map((f, idx) => {
+        let cleanName = f.name.trim() || `file_${idx + 1}.c`;
+        if (!cleanName.toLowerCase().endsWith('.c')) {
+          cleanName = `${cleanName}.c`;
+        }
+        return {
+          name: cleanName,
+          code: f.code,
+        };
+      });
+
     const hasZip = Boolean(file);
-    const hasCode = Boolean(cCode.trim());
+    const hasCode = validCFiles.length > 0;
 
     if (!hasZip && !hasCode) {
-      setErrorMessage('Please provide a ZIP archive, C source code, or both.');
+      setErrorMessage('Please provide either a ZIP archive, at least one C code file, or both.');
       return;
     }
 
     try {
       setIsUploading(true);
-      const result = await uploadAssignment(title, file, cCode);
+      const result = await uploadAssignment(title, file, validCFiles);
       setCreatedSecret(result.secretToken);
       onUploadSuccess(result.assignment);
     } catch (err: unknown) {
@@ -107,14 +168,15 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const handleDone = () => {
     setTitle('');
     setFile(null);
-    setCCode('');
+    setCFiles([{ id: '1', name: 'main.c', code: '' }]);
     setCreatedSecret(null);
     setErrorMessage(null);
     setIsUploading(false);
     onClose();
   };
 
-  const hasAnyContent = Boolean(file) || Boolean(cCode.trim());
+  const hasAnyContent =
+    Boolean(file) || cFiles.some((f) => f.code.trim().length > 0);
 
   return (
     <div
@@ -122,9 +184,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       role="dialog"
       aria-modal="true"
     >
-      <div className="bg-white rounded-lg border border-slate-200 shadow-xl w-full max-w-xl overflow-hidden text-sm my-auto">
+      <div className="bg-white rounded-lg border border-slate-200 shadow-xl w-full max-w-2xl overflow-hidden text-sm my-auto max-h-[92vh] flex flex-col">
         {/* Header */}
-        <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+        <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50 shrink-0">
           <h2 className="font-semibold text-slate-800 text-sm sm:text-base">
             {createdSecret ? 'Assignment Published' : 'Upload Assignment'}
           </h2>
@@ -142,11 +204,11 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
         {createdSecret ? (
           /* Success Screen */
-          <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4 overflow-y-auto">
             <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-md">
               <p className="font-semibold text-emerald-900 text-sm">Upload Successful!</p>
               <p className="text-xs text-emerald-700 mt-0.5">
-                Your assignment is now live. Anyone can download the resources you provided.
+                Your assignment is now available in the public catalogue.
               </p>
             </div>
 
@@ -187,7 +249,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           </div>
         ) : (
           /* Upload Form */
-          <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <form onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
             {errorMessage && (
               <div className="p-2.5 bg-rose-50 border border-rose-200 rounded text-rose-800 text-xs flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -213,7 +275,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               />
             </div>
 
-            {/* Tab Selector for View Focus */}
+            {/* View Mode Selector */}
             <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-md text-xs">
               <button
                 type="button"
@@ -242,7 +304,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 }`}
               >
                 <Code2 className="w-3.5 h-3.5" />
-                <span>C Code Only</span>
+                <span>C Files Only</span>
               </button>
             </div>
 
@@ -307,35 +369,72 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               </div>
             )}
 
-            {/* C Source Code Textarea Section */}
+            {/* Multiple C Code Files Section */}
             {(activeTab === 'both' || activeTab === 'c') && (
-              <div>
-                <label htmlFor="upload-c-code" className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-slate-700 flex items-center gap-1">
                     <Code2 className="w-3.5 h-3.5 text-slate-500" />
-                    <span>C Source Code (Optional)</span>
-                  </span>
-                  <span className="text-[11px] text-slate-400 font-normal">Pastes directly as .c</span>
-                </label>
-                <textarea
-                  id="upload-c-code"
-                  rows={5}
-                  value={cCode}
-                  disabled={isUploading}
-                  onChange={(e) => setCCode(e.target.value)}
-                  placeholder={`#include <stdio.h>\n\nint main() {\n    printf("Hello Assignment Hub!\\n");\n    return 0;\n}`}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-md font-mono text-xs text-slate-800 bg-slate-50 focus:bg-white focus:outline-none focus:border-blue-500 resize-y"
-                  spellCheck={false}
-                />
+                    <span>C Source Code Files (Optional)</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleAddCFile}
+                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-semibold px-2 py-0.5 rounded hover:bg-blue-50"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Another C File</span>
+                  </button>
+                </div>
+
+                {cFiles.map((cFile, index) => (
+                  <div
+                    key={cFile.id}
+                    className="p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-1 max-w-xs">
+                        <span className="text-[11px] text-slate-400 font-medium">#{index + 1}</span>
+                        <input
+                          type="text"
+                          value={cFile.name}
+                          onChange={(e) => handleCFileNameChange(cFile.id, e.target.value)}
+                          placeholder="e.g. main.c"
+                          className="w-full px-2 py-1 font-mono text-xs border border-slate-300 rounded bg-white focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+
+                      {cFiles.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCFile(cFile.id)}
+                          className="text-slate-400 hover:text-rose-600 p-1 rounded"
+                          title="Remove this file"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    <textarea
+                      rows={4}
+                      value={cFile.code}
+                      onChange={(e) => handleCCodeChange(cFile.id, e.target.value)}
+                      placeholder={`// Paste complete source code for ${cFile.name}\n#include <stdio.h>\n\nint main() {\n    return 0;\n}`}
+                      className="w-full px-3 py-2 border border-slate-300 rounded font-mono text-xs text-slate-800 bg-white focus:outline-none focus:border-blue-500 resize-y"
+                      spellCheck={false}
+                    />
+                  </div>
+                ))}
               </div>
             )}
 
             <p className="text-[11px] text-slate-500 italic">
-              Note: You can provide a ZIP file, paste C code, or provide both.
+              You can upload a ZIP archive, add one or multiple C files, or provide both.
             </p>
 
             {/* Footer Buttons */}
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+            <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2 shrink-0">
               <button
                 type="button"
                 onClick={handleDone}

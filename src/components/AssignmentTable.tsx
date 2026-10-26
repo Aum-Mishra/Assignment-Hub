@@ -7,13 +7,19 @@ import {
   X,
   FileArchive,
   Code2,
+  Copy,
   Loader2,
   RotateCcw,
   Calendar
 } from 'lucide-react';
 import { Assignment } from '../types/assignment';
 import { formatBytes } from '../lib/validation';
-import { downloadAssignment, downloadCCode, getStoredTokens } from '../lib/assignments';
+import {
+  downloadAssignment,
+  downloadAllCFiles,
+  getAssignmentCFiles,
+  getStoredTokens
+} from '../lib/assignments';
 
 interface AssignmentTableProps {
   assignments: Assignment[];
@@ -25,6 +31,7 @@ interface AssignmentTableProps {
   onSearchChange: (query: string) => void;
   onOpenDelete: (assignment: Assignment) => void;
   onOpenRename: (assignment: Assignment) => void;
+  onOpenViewCode: (assignment: Assignment) => void;
   onLoadMore: () => void;
   hasMore: boolean;
   onRetry: () => void;
@@ -41,12 +48,14 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
   onSearchChange,
   onOpenDelete,
   onOpenRename,
+  onOpenViewCode,
   onLoadMore,
   hasMore,
   onRetry,
   errorMessage,
 }) => {
   const [downloadingZipId, setDownloadingZipId] = useState<number | null>(null);
+  const [downloadingCId, setDownloadingCId] = useState<number | null>(null);
   const myTokens = getStoredTokens();
 
   const handleDownloadZip = async (assignment: Assignment) => {
@@ -61,12 +70,15 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
     }
   };
 
-  const handleDownloadC = (assignment: Assignment) => {
+  const handleDownloadCFiles = async (assignment: Assignment) => {
     try {
-      downloadCCode(assignment);
+      setDownloadingCId(assignment.id);
+      await downloadAllCFiles(assignment);
     } catch (err) {
       console.error('C download error:', err);
       alert(err instanceof Error ? err.message : 'C source download failed.');
+    } finally {
+      setDownloadingCId(null);
     }
   };
 
@@ -180,15 +192,17 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                     <th className="py-2.5 px-4 w-4/12">Assignment Title</th>
                     <th className="py-2.5 px-3 w-3/12">Available Files</th>
                     <th className="py-2.5 px-3 w-2/12">Uploaded</th>
-                    <th className="py-2.5 px-4 w-3/12 text-right">Download & Actions</th>
+                    <th className="py-2.5 px-4 w-3/12 text-right">Downloads & Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {assignments.map((assignment) => {
                     const isMine = Boolean(myTokens[assignment.id]);
                     const hasZip = Boolean(assignment.file_path);
-                    const hasC = Boolean(assignment.c_code && assignment.c_code.trim().length > 0);
+                    const cFiles = getAssignmentCFiles(assignment);
+                    const hasCFiles = cFiles.length > 0;
                     const isDownloadingZip = downloadingZipId === assignment.id;
+                    const isDownloadingC = downloadingCId === assignment.id;
 
                     return (
                       <tr
@@ -214,7 +228,10 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                         <td className="py-2.5 px-3 align-middle">
                           <div className="flex flex-wrap items-center gap-1.5">
                             {hasZip && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-mono text-[11px]" title={assignment.file_name || 'ZIP Archive'}>
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-mono text-[11px]"
+                                title={assignment.file_name || 'ZIP Archive'}
+                              >
                                 <FileArchive className="w-3 h-3 text-blue-600" />
                                 <span>ZIP</span>
                                 {assignment.file_size ? (
@@ -223,11 +240,18 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                               </span>
                             )}
 
-                            {hasC && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-mono text-[11px]" title="C Source Code">
+                            {hasCFiles && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenViewCode(assignment)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 font-mono text-[11px] transition-colors"
+                                title="Click to view & copy C code"
+                              >
                                 <Code2 className="w-3 h-3 text-emerald-600" />
-                                <span>C Code (.c)</span>
-                              </span>
+                                <span>
+                                  {cFiles.length === 1 ? cFiles[0].name : `${cFiles.length} C Files`}
+                                </span>
+                              </button>
                             )}
                           </div>
                         </td>
@@ -258,16 +282,34 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                               </button>
                             )}
 
-                            {/* Download C Code button (only if C Code exists) */}
-                            {hasC && (
+                            {/* Download C Files button (only if C files exist) */}
+                            {hasCFiles && (
                               <button
                                 type="button"
-                                onClick={() => handleDownloadC(assignment)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors"
-                                title="Download C Source Code (.c)"
+                                onClick={() => handleDownloadCFiles(assignment)}
+                                disabled={isDownloadingC}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors disabled:opacity-50"
+                                title={cFiles.length === 1 ? `Download ${cFiles[0].name}` : `Download All (${cFiles.length} C files bundled in ZIP)`}
                               >
-                                <Download className="w-3 h-3" />
-                                <span>Download C Code</span>
+                                {isDownloadingC ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Download className="w-3 h-3" />
+                                )}
+                                <span>Download C Files</span>
+                              </button>
+                            )}
+
+                            {/* Copy/View Code button */}
+                            {hasCFiles && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenViewCode(assignment)}
+                                className="p-1 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded transition-colors"
+                                title="View & Copy C Code"
+                                aria-label="View & Copy C Code"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
                               </button>
                             )}
 
@@ -306,8 +348,10 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
               {assignments.map((assignment) => {
                 const isMine = Boolean(myTokens[assignment.id]);
                 const hasZip = Boolean(assignment.file_path);
-                const hasC = Boolean(assignment.c_code && assignment.c_code.trim().length > 0);
+                const cFiles = getAssignmentCFiles(assignment);
+                const hasCFiles = cFiles.length > 0;
                 const isDownloadingZip = downloadingZipId === assignment.id;
+                const isDownloadingC = downloadingCId === assignment.id;
 
                 return (
                   <div
@@ -336,11 +380,15 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                         </span>
                       )}
 
-                      {hasC && (
-                        <span className="inline-flex items-center gap-1 font-mono text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-800">
+                      {hasCFiles && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenViewCode(assignment)}
+                          className="inline-flex items-center gap-1 font-mono text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-800"
+                        >
                           <Code2 className="w-3 h-3 text-emerald-600" />
-                          <span>C Code</span>
-                        </span>
+                          <span>{cFiles.length === 1 ? cFiles[0].name : `${cFiles.length} C Files`}</span>
+                        </button>
                       )}
 
                       <span className="flex items-center gap-1 text-[11px]">
@@ -368,14 +416,30 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                           </button>
                         )}
 
-                        {hasC && (
+                        {hasCFiles && (
                           <button
                             type="button"
-                            onClick={() => handleDownloadC(assignment)}
+                            onClick={() => handleDownloadCFiles(assignment)}
+                            disabled={isDownloadingC}
                             className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded"
                           >
-                            <Download className="w-3 h-3" />
-                            <span>Download .c</span>
+                            {isDownloadingC ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Download className="w-3 h-3" />
+                            )}
+                            <span>Download C Files</span>
+                          </button>
+                        )}
+
+                        {hasCFiles && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenViewCode(assignment)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 rounded"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>Copy Code</span>
                           </button>
                         )}
                       </div>

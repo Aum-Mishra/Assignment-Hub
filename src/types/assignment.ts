@@ -1,10 +1,16 @@
+export interface CCodeFile {
+  name: string;
+  code: string;
+}
+
 export interface Assignment {
   id: number;
   title: string;
   file_path: string | null;
   file_name: string | null;
   file_size: number | null;
-  c_code: string | null;
+  c_code?: string | null;
+  c_files?: CCodeFile[] | null;
   created_at: string;
 }
 

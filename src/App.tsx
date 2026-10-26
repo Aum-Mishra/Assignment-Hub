@@ -4,6 +4,7 @@ import { AssignmentTable } from './components/AssignmentTable';
 import { UploadModal } from './components/UploadModal';
 import { DeleteModal } from './components/DeleteModal';
 import { RenameModal } from './components/RenameModal';
+import { ViewCodeModal } from './components/ViewCodeModal';
 import { ConfigError } from './components/ConfigError';
 import { configStatus } from './lib/supabase';
 import { getAssignments } from './lib/assignments';
@@ -28,6 +29,7 @@ export function App() {
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [deletingAssignment, setDeletingAssignment] = useState<Assignment | null>(null);
   const [renamingAssignment, setRenamingAssignment] = useState<Assignment | null>(null);
+  const [viewingCodeAssignment, setViewingCodeAssignment] = useState<Assignment | null>(null);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -127,6 +129,7 @@ export function App() {
           onSearchChange={handleSearchChange}
           onOpenDelete={(a) => setDeletingAssignment(a)}
           onOpenRename={(a) => setRenamingAssignment(a)}
+          onOpenViewCode={(a) => setViewingCodeAssignment(a)}
           onLoadMore={handleLoadMore}
           hasMore={hasMore}
           onRetry={() => fetchCatalogue(page, searchQuery, false)}
@@ -155,6 +158,13 @@ export function App() {
         isOpen={Boolean(renamingAssignment)}
         onClose={() => setRenamingAssignment(null)}
         onRenameSuccess={handleRenameSuccess}
+      />
+
+      {/* View & Copy C Code Modal */}
+      <ViewCodeModal
+        assignment={viewingCodeAssignment}
+        isOpen={Boolean(viewingCodeAssignment)}
+        onClose={() => setViewingCodeAssignment(null)}
       />
 
       {/* Minimal Footer */}

@@ -1,8 +1,10 @@
+import JSZip from 'jszip';
 import { getSupabaseClient, STORAGE_BUCKET } from './supabase';
 import {
   Assignment,
   AssignmentQueryParams,
   AssignmentQueryResult,
+  CCodeFile,
   UploadAssignmentResult
 } from '../types/assignment';
 import { validateTitle, validateZipFile } from './validation';
@@ -61,7 +63,33 @@ export function removeUploaderToken(assignmentId: number): void {
 }
 
 /**
+ * Helper to safely extract all C code files from an assignment record.
+ * Supports both modern multiple c_files JSONB and legacy single c_code string.
+ */
+export function getAssignmentCFiles(assignment: Assignment): CCodeFile[] {
+  if (Array.isArray(assignment.c_files) && assignment.c_files.length > 0) {
+    return assignment.c_files
+      .filter((f) => f && f.name && typeof f.code === 'string' && f.code.trim().length > 0)
+      .map((f) => ({
+        name: f.name.endsWith('.c') ? f.name : `${f.name}.c`,
+        code: f.code,
+      }));
+  }
+
+  if (assignment.c_code && assignment.c_code.trim().length > 0) {
+    const base = assignment.title
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return [{ name: base ? `${base}.c` : 'main.c', code: assignment.c_code }];
+  }
+
+  return [];
+}
+
+/**
  * Fetch assignments with optional case-insensitive search, pagination, and sorting (newest first).
+ * Uses select('*') so it never throws a 'column does not exist' error if columns vary across migrations.
  */
 export async function getAssignments(
   params: AssignmentQueryParams = {}
@@ -82,9 +110,10 @@ export async function getAssignments(
     }
   }
 
+  // Select all columns safely
   let query = supabase
     .from('assignments')
-    .select('id, title, file_path, file_name, file_size, c_code, created_at', { count: 'exact' })
+    .select('*', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(from, to);
 
@@ -111,7 +140,28 @@ export async function getAssignments(
     }
   }
 
-  const assignments: Assignment[] = data || [];
+  // Normalize assignment rows to guarantee consistent structure
+  const rawList = data || [];
+  const assignments: Assignment[] = rawList.map((row: Record<string, unknown>) => {
+    let parsedCFiles: CCodeFile[] = [];
+    if (Array.isArray(row.c_files)) {
+      parsedCFiles = row.c_files as CCodeFile[];
+    } else if (typeof row.c_code === 'string' && row.c_code.trim()) {
+      parsedCFiles = [{ name: 'main.c', code: row.c_code }];
+    }
+
+    return {
+      id: Number(row.id),
+      title: String(row.title || ''),
+      file_path: row.file_path ? String(row.file_path) : null,
+      file_name: row.file_name ? String(row.file_name) : null,
+      file_size: row.file_size ? Number(row.file_size) : null,
+      c_code: row.c_code ? String(row.c_code) : null,
+      c_files: parsedCFiles,
+      created_at: String(row.created_at || ''),
+    };
+  });
+
   const hasMore = to + 1 < filteredCount;
 
   return {
@@ -129,25 +179,38 @@ export async function getAssignments(
  * Accepts:
  * - title (required)
  * - file (optional ZIP archive)
- * - cCode (optional C source code)
- * At least one of file or cCode must be provided.
+ * - cFiles (optional list of multiple C source code files with names)
+ * At least one of file or cFiles must be provided.
  */
 export async function uploadAssignment(
   title: string,
   file?: File | null,
-  cCode?: string | null
+  cFiles?: CCodeFile[]
 ): Promise<UploadAssignmentResult> {
   const titleValidation = validateTitle(title);
   if (!titleValidation.valid) {
     throw new Error(titleValidation.error || 'Invalid title');
   }
 
-  const cleanCCode = cCode?.trim() || null;
-  const hasFile = Boolean(file);
-  const hasCCode = Boolean(cleanCCode && cleanCCode.length > 0);
+  // Filter valid C files with non-empty code
+  const validCFiles: CCodeFile[] = (cFiles || [])
+    .filter((f) => f && f.code && f.code.trim().length > 0)
+    .map((f, index) => {
+      let rawName = f.name?.trim() || `file_${index + 1}.c`;
+      if (!rawName.toLowerCase().endsWith('.c')) {
+        rawName = `${rawName}.c`;
+      }
+      return {
+        name: rawName,
+        code: f.code,
+      };
+    });
 
-  if (!hasFile && !hasCCode) {
-    throw new Error('Please provide either a ZIP file, C source code, or both.');
+  const hasFile = Boolean(file);
+  const hasCFiles = validCFiles.length > 0;
+
+  if (!hasFile && !hasCFiles) {
+    throw new Error('Please provide either a ZIP archive, at least one C code file, or both.');
   }
 
   let storageFilePath: string | null = null;
@@ -196,13 +259,13 @@ export async function uploadAssignment(
     p_file_path: storageFilePath,
     p_file_name: fileName,
     p_file_size: fileSize,
-    p_c_code: cleanCCode,
+    p_c_code: validCFiles.length > 0 ? validCFiles[0].code : null,
     p_secret_token: secretToken,
+    p_c_files: validCFiles,
   });
 
   if (rpcError) {
     console.error('create_assignment RPC error:', rpcError);
-    // Cleanup orphaned storage file if it was uploaded
     if (storageFilePath) {
       try {
         await supabase.storage.from(STORAGE_BUCKET).remove([storageFilePath]);
@@ -213,9 +276,11 @@ export async function uploadAssignment(
     throw new Error(`Failed to save assignment record: ${rpcError.message}`);
   }
 
-  const assignment = rpcData as Assignment;
+  const assignment: Assignment = {
+    ...(rpcData as Assignment),
+    c_files: validCFiles,
+  };
 
-  // Save deletion token in local storage
   saveUploaderToken(assignment.id, secretToken);
 
   return {
@@ -243,7 +308,6 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
     throw new Error(error.message || 'Unauthorized or invalid deletion key.');
   }
 
-  // If a ZIP file was associated with this assignment, remove it from storage
   const filePath = (data as { file_path?: string })?.file_path;
   if (filePath) {
     const normalized = filePath.replace(/^assignments\//, '');
@@ -257,7 +321,6 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
     }
   }
 
-  // Remove local token once deleted
   removeUploaderToken(id);
 }
 
@@ -283,7 +346,6 @@ export async function renameAssignment(
 
   const supabase = getSupabaseClient();
 
-  // Try RPC first
   try {
     const { data: rpcData, error: rpcError } = await supabase.rpc('rename_assignment', {
       p_id: id,
@@ -298,7 +360,6 @@ export async function renameAssignment(
     console.warn('RPC rename_assignment call failed, trying direct update:', rpcErr);
   }
 
-  // Fallback: direct table update
   const payload: { title: string; file_name?: string } = {
     title: newTitle.trim(),
   };
@@ -310,7 +371,7 @@ export async function renameAssignment(
     .from('assignments')
     .update(payload)
     .eq('id', id)
-    .select('id, title, file_path, file_name, file_size, c_code, created_at')
+    .select('*')
     .single();
 
   if (error) {
@@ -376,27 +437,52 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
 }
 
 /**
- * Download C source code as a .c file, preserving line breaks, indentation, and formatting.
- * Uses a meaningful filename derived from assignment title (e.g. linked_list.c).
+ * Download All C Files:
+ * - If 1 file: downloads directly as filename.c
+ * - If multiple files: bundles all C files into a single ZIP archive and downloads automatically.
  */
-export function downloadCCode(assignment: Assignment): void {
-  if (!assignment.c_code) {
-    throw new Error('This assignment does not have C source code available.');
+export async function downloadAllCFiles(assignment: Assignment): Promise<void> {
+  const cFiles = getAssignmentCFiles(assignment);
+  if (cFiles.length === 0) {
+    throw new Error('This assignment does not contain any C source code files.');
   }
 
-  const blob = new Blob([assignment.c_code], { type: 'text/plain;charset=utf-8' });
-  const downloadUrl = window.URL.createObjectURL(blob);
+  // Single C file: download directly
+  if (cFiles.length === 1) {
+    const single = cFiles[0];
+    const blob = new Blob([single.code], { type: 'text/plain;charset=utf-8' });
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = single.name.endsWith('.c') ? single.name : `${single.name}.c`;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+    }, 200);
+    return;
+  }
+
+  // Multiple C files: bundle into a ZIP archive using JSZip
+  const zip = new JSZip();
+  cFiles.forEach((file) => {
+    const cleanName = file.name.endsWith('.c') ? file.name : `${file.name}.c`;
+    zip.file(cleanName, file.code);
+  });
+
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+  const downloadUrl = window.URL.createObjectURL(zipBlob);
   const link = document.createElement('a');
   link.href = downloadUrl;
 
-  // Sanitize title to create a readable filename like "socket_programming.c"
-  const safeBaseName = assignment.title
+  const safeTitle = assignment.title
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '_')
-    .replace(/^_+|_+$/g, '') || 'source_code';
+    .replace(/^_+|_+$/g, '') || 'assignment';
 
-  link.download = `${safeBaseName}.c`;
+  link.download = `${safeTitle}_c_files.zip`;
   document.body.appendChild(link);
   link.click();
 
@@ -404,4 +490,34 @@ export function downloadCCode(assignment: Assignment): void {
     document.body.removeChild(link);
     window.URL.revokeObjectURL(downloadUrl);
   }, 200);
+}
+
+/**
+ * Copy individual C source code to clipboard with error handling.
+ */
+export async function copyCCodeToClipboard(code: string): Promise<boolean> {
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(code);
+      return true;
+    }
+  } catch (err) {
+    console.warn('Clipboard writeText failed, trying fallback:', err);
+  }
+
+  // Fallback for older browsers or restricted iframe environments
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = code;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const successful = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return successful;
+  } catch {
+    return false;
+  }
 }
