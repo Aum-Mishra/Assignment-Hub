@@ -6,9 +6,10 @@
 -- 2. Secure anonymous ownership: Private secrets table with SHA-256 hash.
 -- 3. Secure deletion RPC: Validates uploader secret before removing DB record
 --    and returning file_path for cleanup via the Supabase Storage API.
--- 4. Orphaned file cleanup: Automatically removes database records if a ZIP
+-- 4. Renaming support: Allows renaming title and filename on any assignment.
+-- 5. Orphaned file cleanup: Automatically removes database records if a ZIP
 --    file was deleted from Supabase Storage.
--- 5. Configures public download, upload, and delete policies for Supabase Storage.
+-- 6. Configures public download, upload, and delete policies for Supabase Storage.
 -- ==============================================================================
 
 -- 1. Enable required PostgreSQL extensions
@@ -54,8 +55,8 @@ ALTER TABLE public.assignments ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Public assignments are viewable by anyone" ON public.assignments;
 DROP POLICY IF EXISTS "Anyone can insert assignment metadata" ON public.assignments;
+DROP POLICY IF EXISTS "Anyone can update assignment metadata" ON public.assignments;
 DROP POLICY IF EXISTS "Deny direct public delete" ON public.assignments;
-DROP POLICY IF EXISTS "Deny direct public update" ON public.assignments;
 
 -- Allow anyone to read assignments
 CREATE POLICY "Public assignments are viewable by anyone"
@@ -76,6 +77,18 @@ CREATE POLICY "Anyone can insert assignment metadata"
         file_size <= 26214400 AND
         char_length(trim(file_name)) > 0 AND
         file_path LIKE 'assignments/%'
+    );
+
+-- Allow renaming titles and filenames
+CREATE POLICY "Anyone can update assignment metadata"
+    ON public.assignments
+    FOR UPDATE
+    TO anon, authenticated
+    USING (true)
+    WITH CHECK (
+        char_length(trim(title)) >= 1 AND
+        char_length(trim(title)) <= 150 AND
+        char_length(trim(file_name)) > 0
     );
 
 -- 6. Row Level Security on private assignment_secrets table
@@ -183,9 +196,49 @@ BEGIN
 END;
 $$;
 
--- 9. Automatic Cleanup of Orphaned Assignments
--- If a ZIP file was removed from Supabase Storage directly, this function
--- cleans up any corresponding database records so they don't linger on the website.
+-- 9. Stored Procedure: rename_assignment
+-- Allows renaming an assignment's title and/or ZIP filename.
+CREATE OR REPLACE FUNCTION public.rename_assignment(
+    p_id BIGINT,
+    p_new_title TEXT,
+    p_new_file_name TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_clean_title TEXT;
+    v_clean_filename TEXT;
+    v_updated assignments%ROWTYPE;
+BEGIN
+    v_clean_title := trim(p_new_title);
+    IF char_length(v_clean_title) < 1 OR char_length(v_clean_title) > 150 THEN
+        RAISE EXCEPTION 'Title must be between 1 and 150 characters';
+    END IF;
+
+    IF p_new_file_name IS NOT NULL AND char_length(trim(p_new_file_name)) > 0 THEN
+        v_clean_filename := trim(p_new_file_name);
+        IF NOT v_clean_filename ILIKE '%.zip' THEN
+            v_clean_filename := v_clean_filename || '.zip';
+        END IF;
+    END IF;
+
+    UPDATE public.assignments
+    SET title = v_clean_title,
+        file_name = COALESCE(v_clean_filename, file_name)
+    WHERE id = p_id
+    RETURNING * INTO v_updated;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Assignment not found';
+    END IF;
+
+    RETURN to_jsonb(v_updated);
+END;
+$$;
+
+-- 10. Automatic Cleanup of Orphaned Assignments
 CREATE OR REPLACE FUNCTION public.clean_orphaned_assignments()
 RETURNS void
 LANGUAGE plpgsql
@@ -203,14 +256,15 @@ END;
 $$;
 
 -- Grant permissions on tables and RPC functions
-GRANT SELECT ON public.assignments TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.assignments TO anon, authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_assignment(BIGINT, TEXT) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.rename_assignment(BIGINT, TEXT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.clean_orphaned_assignments() TO anon, authenticated;
 
 -- ==============================================================================
--- 10. Storage Bucket Configuration & Storage Policies
+-- 11. Storage Bucket Configuration & Storage Policies
 -- ==============================================================================
 
 -- Create or update the 'assignments' public bucket
@@ -258,7 +312,3 @@ CREATE POLICY "Anyone can delete assignment files"
 
 -- Run immediate cleanup of any existing orphaned rows right now
 SELECT public.clean_orphaned_assignments();
-
--- Run immediate cleanup of any existing orphaned rows right now
-SELECT public.clean_orphaned_assignments();
-

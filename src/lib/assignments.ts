@@ -240,6 +240,66 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
 }
 
 /**
+ * Rename an assignment's title and/or filename.
+ */
+export async function renameAssignment(
+  id: number,
+  newTitle: string,
+  newFileName?: string
+): Promise<Assignment> {
+  const titleVal = validateTitle(newTitle);
+  if (!titleVal.valid) {
+    throw new Error(titleVal.error || 'Invalid title');
+  }
+
+  let cleanFileName = newFileName?.trim();
+  if (cleanFileName) {
+    if (!cleanFileName.toLowerCase().endsWith('.zip')) {
+      cleanFileName = `${cleanFileName}.zip`;
+    }
+  }
+
+  const supabase = getSupabaseClient();
+
+  // Try RPC first
+  try {
+    const { data: rpcData, error: rpcError } = await supabase.rpc('rename_assignment', {
+      p_id: id,
+      p_new_title: newTitle.trim(),
+      p_new_file_name: cleanFileName || null,
+    });
+
+    if (!rpcError && rpcData) {
+      return rpcData as Assignment;
+    }
+  } catch (rpcErr) {
+    console.warn('RPC rename_assignment call failed, trying direct update:', rpcErr);
+  }
+
+  // Fallback: direct table update
+  const payload: { title: string; file_name?: string } = {
+    title: newTitle.trim(),
+  };
+  if (cleanFileName) {
+    payload.file_name = cleanFileName;
+  }
+
+  const { data, error } = await supabase
+    .from('assignments')
+    .update(payload)
+    .eq('id', id)
+    .select('id, title, file_path, file_name, file_size, created_at')
+    .single();
+
+  if (error) {
+    console.error('Rename error:', error);
+    throw new Error(error.message || 'Failed to rename assignment.');
+  }
+
+  return data as Assignment;
+}
+
+/**
  * Download an assignment ZIP file.
  */
 export async function downloadAssignment(assignment: Assignment): Promise<void> {

@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { AssignmentTable } from './components/AssignmentTable';
 import { UploadModal } from './components/UploadModal';
 import { DeleteModal } from './components/DeleteModal';
+import { RenameModal } from './components/RenameModal';
 import { ConfigError } from './components/ConfigError';
 import { configStatus } from './lib/supabase';
 import { getAssignments } from './lib/assignments';
@@ -26,6 +27,7 @@ export function App() {
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [deletingAssignment, setDeletingAssignment] = useState<Assignment | null>(null);
+  const [renamingAssignment, setRenamingAssignment] = useState<Assignment | null>(null);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -104,6 +106,10 @@ export function App() {
     setFilteredCount((c) => Math.max(0, c - 1));
   };
 
+  const handleRenameSuccess = (updated: Assignment) => {
+    setAssignments((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col text-slate-800">
       {/* Top Navbar */}
@@ -120,6 +126,7 @@ export function App() {
           searchQuery={searchQuery}
           onSearchChange={handleSearchChange}
           onOpenDelete={(a) => setDeletingAssignment(a)}
+          onOpenRename={(a) => setRenamingAssignment(a)}
           onLoadMore={handleLoadMore}
           hasMore={hasMore}
           onRetry={() => fetchCatalogue(page, searchQuery, false)}
@@ -140,6 +147,14 @@ export function App() {
         isOpen={Boolean(deletingAssignment)}
         onClose={() => setDeletingAssignment(null)}
         onDeleteSuccess={handleDeleteSuccess}
+      />
+
+      {/* Rename Modal */}
+      <RenameModal
+        assignment={renamingAssignment}
+        isOpen={Boolean(renamingAssignment)}
+        onClose={() => setRenamingAssignment(null)}
+        onRenameSuccess={handleRenameSuccess}
       />
 
       {/* Minimal Footer */}

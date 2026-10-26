@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   Download,
   Trash2,
+  Edit2,
   Search,
   X,
   FileArchive,
@@ -23,6 +24,7 @@ interface AssignmentTableProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   onOpenDelete: (assignment: Assignment) => void;
+  onOpenRename: (assignment: Assignment) => void;
   onLoadMore: () => void;
   hasMore: boolean;
   onRetry: () => void;
@@ -38,6 +40,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
   searchQuery,
   onSearchChange,
   onOpenDelete,
+  onOpenRename,
   onLoadMore,
   hasMore,
   onRetry,
@@ -235,6 +238,16 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
 
                             <button
                               type="button"
+                              onClick={() => onOpenRename(assignment)}
+                              className="p-1 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                              title="Rename assignment"
+                              aria-label="Rename assignment"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              type="button"
                               onClick={() => onOpenDelete(assignment)}
                               className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
                               title={isMine ? 'Delete your assignment' : 'Delete assignment (requires deletion key)'}
@@ -304,14 +317,25 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                         <span>Download ZIP</span>
                       </button>
 
-                      <button
-                        type="button"
-                        onClick={() => onOpenDelete(assignment)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Delete</span>
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onOpenRename(assignment)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>Rename</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => onOpenDelete(assignment)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
