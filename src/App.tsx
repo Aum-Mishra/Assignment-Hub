@@ -1,16 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Header } from './components/Header';
-import { Hero } from './components/Hero';
-import { UploadForm } from './components/UploadForm';
-import { AssignmentList } from './components/AssignmentList';
-import { Footer } from './components/Footer';
+import { Navbar } from './components/Navbar';
+import { AssignmentTable } from './components/AssignmentTable';
+import { UploadModal } from './components/UploadModal';
+import { DeleteModal } from './components/DeleteModal';
 import { ConfigError } from './components/ConfigError';
 import { configStatus } from './lib/supabase';
 import { getAssignments } from './lib/assignments';
 import { Assignment } from './types/assignment';
 
 export function App() {
-  // If Supabase credentials are missing, render friendly configuration screen
   if (!configStatus.isConfigured) {
     return <ConfigError status={configStatus} />;
   }
@@ -25,9 +23,12 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
 
+  // Modals state
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [deletingAssignment, setDeletingAssignment] = useState<Assignment | null>(null);
+
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Fetch assignments from Supabase
   const fetchCatalogue = useCallback(
     async (currentPage: number, query: string, isAppend: boolean = false) => {
       try {
@@ -40,7 +41,7 @@ export function App() {
 
         const result = await getAssignments({
           page: currentPage,
-          pageSize: 12,
+          pageSize: 25,
           searchQuery: query,
         });
 
@@ -55,12 +56,12 @@ export function App() {
         setHasMore(result.hasMore);
         setPage(result.page);
       } catch (err: unknown) {
-        console.error('Error in fetchCatalogue:', err);
-        const msg =
+        console.error('Error fetching catalogue:', err);
+        setErrorMessage(
           err instanceof Error
             ? err.message
-            : 'Unable to reach the Supabase database. Please check your connection.';
-        setErrorMessage(msg);
+            : 'Unable to connect to Supabase. Check your connection.'
+        );
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);
@@ -69,12 +70,10 @@ export function App() {
     []
   );
 
-  // Initial load
   useEffect(() => {
     fetchCatalogue(1, '');
   }, [fetchCatalogue]);
 
-  // Handle live search with 300ms debounce
   const handleSearchChange = (query: string) => {
     setSearchQuery(query);
 
@@ -85,74 +84,68 @@ export function App() {
     debounceTimerRef.current = setTimeout(() => {
       setPage(1);
       fetchCatalogue(1, query, false);
-    }, 300);
+    }, 250);
   };
 
-  // Load more pagination
   const handleLoadMore = () => {
     if (!hasMore || isLoadingMore) return;
-    const nextPage = page + 1;
-    fetchCatalogue(nextPage, searchQuery, true);
+    fetchCatalogue(page + 1, searchQuery, true);
   };
 
-  // Retry handler
-  const handleRetry = () => {
-    fetchCatalogue(page, searchQuery, false);
-  };
-
-  // When a new assignment is uploaded successfully:
-  // Prepend it to the list, increment counts, clear search if active, and scroll into view.
   const handleUploadSuccess = (newAssignment: Assignment) => {
-    setAssignments((prev) => {
-      // Avoid duplicate if already in list
-      const exists = prev.some((a) => a.id === newAssignment.id);
-      if (exists) return prev;
-      return [newAssignment, ...prev];
-    });
+    setAssignments((prev) => [newAssignment, ...prev.filter((a) => a.id !== newAssignment.id)]);
+    setTotalCount((c) => c + 1);
+    setFilteredCount((c) => c + 1);
+  };
 
-    setTotalCount((prev) => prev + 1);
-    setFilteredCount((prev) => prev + 1);
-
-    // If there was an active search query, clear it so user sees their new assignment
-    if (searchQuery.trim().length > 0) {
-      setSearchQuery('');
-      fetchCatalogue(1, '', false);
-    }
-
-    // Smooth scroll to the newly created assignment card
-    setTimeout(() => {
-      const cardEl = document.getElementById(`assignment-${newAssignment.id}`);
-      if (cardEl) {
-        cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        cardEl.classList.add('ring-4', 'ring-brand-500/40');
-        setTimeout(() => {
-          cardEl.classList.remove('ring-4', 'ring-brand-500/40');
-        }, 3000);
-      }
-    }, 300);
+  const handleDeleteSuccess = (deletedId: number) => {
+    setAssignments((prev) => prev.filter((a) => a.id !== deletedId));
+    setTotalCount((c) => Math.max(0, c - 1));
+    setFilteredCount((c) => Math.max(0, c - 1));
   };
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <Header totalCount={totalCount} />
+    <div className="min-h-screen bg-slate-50 flex flex-col text-slate-800">
+      {/* Top Navbar */}
+      <Navbar totalCount={totalCount} onOpenUpload={() => setIsUploadOpen(true)} />
+
+      {/* Main Content Area */}
       <main className="flex-1">
-        <Hero />
-        <UploadForm onUploadSuccess={handleUploadSuccess} />
-        <AssignmentList
+        <AssignmentTable
           assignments={assignments}
           totalCount={totalCount}
           filteredCount={filteredCount}
           isLoading={isLoading}
           isLoadingMore={isLoadingMore}
-          errorMessage={errorMessage}
           searchQuery={searchQuery}
           onSearchChange={handleSearchChange}
-          onRetry={handleRetry}
+          onOpenDelete={(a) => setDeletingAssignment(a)}
           onLoadMore={handleLoadMore}
           hasMore={hasMore}
+          onRetry={() => fetchCatalogue(page, searchQuery, false)}
+          errorMessage={errorMessage}
         />
       </main>
-      <Footer />
+
+      {/* Upload Modal */}
+      <UploadModal
+        isOpen={isUploadOpen}
+        onClose={() => setIsUploadOpen(false)}
+        onUploadSuccess={handleUploadSuccess}
+      />
+
+      {/* Delete Modal */}
+      <DeleteModal
+        assignment={deletingAssignment}
+        isOpen={Boolean(deletingAssignment)}
+        onClose={() => setDeletingAssignment(null)}
+        onDeleteSuccess={handleDeleteSuccess}
+      />
+
+      {/* Minimal Footer */}
+      <footer className="py-3 border-t border-slate-200 text-center text-xs text-slate-400 bg-white">
+        Assignment Hub • Public assignment sharing platform
+      </footer>
     </div>
   );
 }

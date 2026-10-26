@@ -7,9 +7,9 @@ export interface Assignment {
   created_at: string;
 }
 
-export interface UploadAssignmentPayload {
-  title: string;
-  file: File;
+export interface UploadAssignmentResult {
+  assignment: Assignment;
+  secretToken: string;
 }
 
 export interface AssignmentQueryParams {

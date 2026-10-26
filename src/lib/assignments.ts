@@ -1,19 +1,63 @@
 import { getSupabaseClient, STORAGE_BUCKET } from './supabase';
-import { Assignment, AssignmentQueryParams, AssignmentQueryResult } from '../types/assignment';
+import {
+  Assignment,
+  AssignmentQueryParams,
+  AssignmentQueryResult,
+  UploadAssignmentResult
+} from '../types/assignment';
 import { validateTitle, validateZipFile } from './validation';
 
+const LOCAL_STORAGE_TOKENS_KEY = 'assignment_hub_uploader_tokens';
+
 /**
- * Generate a cryptographically random unique identifier safe for filenames.
+ * Generate a cryptographically secure 32-character hex secret token.
  */
-function generateUniqueId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+export function generateSecureToken(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const array = new Uint8Array(16);
+    crypto.getRandomValues(array);
+    return Array.from(array, (byte) => byte.toString(16).padStart(2, '0')).join('');
   }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, () =>
+    ((Math.random() * 16) | 0).toString(16)
+  );
+}
+
+/**
+ * Local storage management for anonymous uploader tokens.
+ */
+export function getStoredTokens(): Record<number, string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_TOKENS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveUploaderToken(assignmentId: number, token: string): void {
+  try {
+    const current = getStoredTokens();
+    current[assignmentId] = token;
+    localStorage.setItem(LOCAL_STORAGE_TOKENS_KEY, JSON.stringify(current));
+  } catch (err) {
+    console.warn('Failed to save uploader token to localStorage', err);
+  }
+}
+
+export function getUploaderToken(assignmentId: number): string | null {
+  const current = getStoredTokens();
+  return current[assignmentId] || null;
+}
+
+export function removeUploaderToken(assignmentId: number): void {
+  try {
+    const current = getStoredTokens();
+    delete current[assignmentId];
+    localStorage.setItem(LOCAL_STORAGE_TOKENS_KEY, JSON.stringify(current));
+  } catch (err) {
+    console.warn('Failed to remove uploader token from localStorage', err);
+  }
 }
 
 /**
@@ -24,12 +68,11 @@ export async function getAssignments(
 ): Promise<AssignmentQueryResult> {
   const supabase = getSupabaseClient();
   const page = Math.max(1, params.page || 1);
-  const pageSize = Math.max(1, params.pageSize || 12);
+  const pageSize = Math.max(1, params.pageSize || 25);
   const from = (page - 1) * pageSize;
   const to = from + pageSize - 1;
   const searchQuery = params.searchQuery?.trim();
 
-  // Query filtered items with count
   let query = supabase
     .from('assignments')
     .select('id, title, file_path, file_name, file_size, created_at', { count: 'exact' })
@@ -37,7 +80,6 @@ export async function getAssignments(
     .range(from, to);
 
   if (searchQuery) {
-    // Supabase ilike supports case-insensitive pattern matching
     query = query.ilike('title', `%${searchQuery}%`);
   }
 
@@ -49,9 +91,8 @@ export async function getAssignments(
   }
 
   const filteredCount = count ?? 0;
-
-  // If there's an active search query, also fetch total count of the table for UI badges
   let totalCount = filteredCount;
+
   if (searchQuery) {
     const totalRes = await supabase
       .from('assignments')
@@ -76,17 +117,16 @@ export async function getAssignments(
 
 /**
  * Upload an assignment:
- * 1. Validates inputs.
- * 2. Uploads the ZIP file to Supabase Storage with a safe, unique path.
- * 3. Inserts the assignment metadata into PostgreSQL.
- * 4. Rolls back the storage upload if database insertion fails.
+ * 1. Validates title & ZIP archive.
+ * 2. Generates a secure random 32-character uploader secret token.
+ * 3. Uploads ZIP file to Supabase Storage.
+ * 4. Calls create_assignment RPC function to store metadata & SHA-256 hash.
+ * 5. Saves deletion token in browser localStorage for 1-click verified deletion.
  */
 export async function uploadAssignment(
   title: string,
-  file: File,
-  _onProgress?: (progressPercent: number) => void
-): Promise<Assignment> {
-  // 1. Validation
+  file: File
+): Promise<UploadAssignmentResult> {
   const titleValidation = validateTitle(title);
   if (!titleValidation.valid) {
     throw new Error(titleValidation.error || 'Invalid title');
@@ -98,15 +138,12 @@ export async function uploadAssignment(
   }
 
   const supabase = getSupabaseClient();
-
-  // Generate safe storage path: assignments/<unique-id>-<timestamp>.zip
-  const uniqueId = generateUniqueId();
+  const uniqueId = generateSecureToken().slice(0, 16);
   const timestamp = Date.now();
   const storageFilePath = `assignments/${uniqueId}-${timestamp}.zip`;
+  const secretToken = generateSecureToken();
 
-  // 2. Storage upload
-  // Note: Official supabase-js storage client standard upload does not emit byte-level progress in standard fetch,
-  // so callers should display an honest indeterminate loading state.
+  // Upload ZIP file to Supabase Storage
   const { error: storageError } = await supabase.storage
     .from(STORAGE_BUCKET)
     .upload(storageFilePath, file, {
@@ -119,59 +156,68 @@ export async function uploadAssignment(
     console.error('Supabase Storage upload error:', storageError);
     if (storageError.message.includes('Bucket not found')) {
       throw new Error(
-        `Storage bucket "${STORAGE_BUCKET}" does not exist. Please run the setup SQL in the Supabase SQL Editor.`
+        `Storage bucket "${STORAGE_BUCKET}" does not exist. Please run setup.sql in the Supabase SQL Editor.`
       );
-    }
-    if (storageError.message.includes('exceeded') || storageError.message.includes('Payload too large')) {
-      throw new Error('Upload failed: File exceeds the maximum allowed storage size.');
     }
     throw new Error(`Storage upload failed: ${storageError.message}`);
   }
 
-  // 3. Database record insertion
-  const trimmedTitle = title.trim();
-  const { data: dbData, error: dbError } = await supabase
-    .from('assignments')
-    .insert([
-      {
-        title: trimmedTitle,
-        file_path: storageFilePath,
-        file_name: file.name,
-        file_size: file.size,
-      },
-    ])
-    .select('id, title, file_path, file_name, file_size, created_at')
-    .single();
+  // Register assignment metadata and hash secret via secure RPC
+  const { data: rpcData, error: rpcError } = await supabase.rpc('create_assignment', {
+    p_title: title.trim(),
+    p_file_path: storageFilePath,
+    p_file_name: file.name,
+    p_file_size: file.size,
+    p_secret_token: secretToken,
+  });
 
-  // 4. Rollback handling if database insertion fails
-  if (dbError) {
-    console.error('Database insert error:', dbError);
-
-    // Attempt to remove the orphaned file from storage
+  if (rpcError) {
+    console.error('create_assignment RPC error:', rpcError);
+    // Cleanup orphaned storage file
     try {
-      const { error: cleanupError } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .remove([storageFilePath]);
-
-      if (cleanupError) {
-        console.warn(
-          `Orphaned file cleanup warning: could not remove "${storageFilePath}". Clean up manually if needed.`,
-          cleanupError
-        );
-      }
-    } catch (cleanupCatchErr) {
-      console.warn('Orphaned file cleanup exception:', cleanupCatchErr);
+      await supabase.storage.from(STORAGE_BUCKET).remove([storageFilePath]);
+    } catch (cleanupErr) {
+      console.warn('Storage cleanup warning:', cleanupErr);
     }
-
-    throw new Error(`Failed to save assignment record: ${dbError.message}`);
+    throw new Error(`Failed to save assignment record: ${rpcError.message}`);
   }
 
-  return dbData as Assignment;
+  const assignment = rpcData as Assignment;
+
+  // Save the deletion token in local storage so the original uploader can delete it seamlessly
+  saveUploaderToken(assignment.id, secretToken);
+
+  return {
+    assignment,
+    secretToken,
+  };
+}
+
+/**
+ * Delete an assignment securely:
+ * Calls delete_assignment RPC. The database hashes the provided secret_token
+ * and verifies it against the private assignment_secrets table before deleting
+ * the storage object and database record.
+ */
+export async function deleteAssignment(id: number, secretToken: string): Promise<void> {
+  const supabase = getSupabaseClient();
+
+  const { error } = await supabase.rpc('delete_assignment', {
+    p_id: id,
+    p_secret_token: secretToken.trim(),
+  });
+
+  if (error) {
+    console.error('Delete assignment RPC error:', error);
+    throw new Error(error.message || 'Unauthorized or invalid deletion key.');
+  }
+
+  // Remove local token once deleted
+  removeUploaderToken(id);
 }
 
 /**
  * Download an assignment ZIP file.
- * Retrieves the public URL, fetches the blob, and triggers browser download with the original filename.
  */
 export async function downloadAssignment(assignment: Assignment): Promise<void> {
   const supabase = getSupabaseClient();
@@ -180,7 +226,6 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
     throw new Error('Invalid or unverified file path for this assignment.');
   }
 
-  // 1. Get public URL from Supabase Storage
   const { data } = supabase.storage
     .from(STORAGE_BUCKET)
     .getPublicUrl(assignment.file_path);
@@ -190,12 +235,9 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
   }
 
   try {
-    // 2. Fetch the file blob to force the download with the original human-readable filename
     const response = await fetch(data.publicUrl);
     if (!response.ok) {
-      throw new Error(
-        `Download failed with HTTP ${response.status} (${response.statusText}). File may have been removed.`
-      );
+      throw new Error(`Download failed with status ${response.status}.`);
     }
 
     const blob = await response.blob();
@@ -208,19 +250,15 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
     document.body.appendChild(link);
     link.click();
 
-    // Cleanup object URL
     setTimeout(() => {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(downloadUrl);
     }, 200);
   } catch (err: unknown) {
     console.error('Download error:', err);
-    // If CORS or direct blob fetch fails, fallback to direct window download
     if (data.publicUrl) {
       const fallbackLink = document.createElement('a');
       fallbackLink.href = data.publicUrl;
-      fallbackLink.target = '_blank';
-      fallbackLink.rel = 'noopener noreferrer';
       fallbackLink.download = assignment.file_name;
       document.body.appendChild(fallbackLink);
       fallbackLink.click();
@@ -228,7 +266,7 @@ export async function downloadAssignment(assignment: Assignment): Promise<void> 
       return;
     }
     throw new Error(
-      err instanceof Error ? err.message : 'An error occurred while downloading the file.'
+      err instanceof Error ? err.message : 'Could not download assignment file.'
     );
   }
 }

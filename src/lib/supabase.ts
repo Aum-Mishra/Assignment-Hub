@@ -53,3 +53,4 @@ export function getSupabaseClient(): SupabaseClient {
   }
   return supabase;
 }
+
