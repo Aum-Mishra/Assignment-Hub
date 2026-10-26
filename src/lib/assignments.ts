@@ -73,6 +73,15 @@ export async function getAssignments(
   const to = from + pageSize - 1;
   const searchQuery = params.searchQuery?.trim();
 
+  // On first page load without search, automatically clean up any orphaned DB records whose files were deleted from Storage
+  if (page === 1 && !searchQuery) {
+    try {
+      await supabase.rpc('clean_orphaned_assignments');
+    } catch (e) {
+      // Non-blocking if function not yet applied
+    }
+  }
+
   let query = supabase
     .from('assignments')
     .select('id, title, file_path, file_name, file_size, created_at', { count: 'exact' })
@@ -215,10 +224,14 @@ export async function deleteAssignment(id: number, secretToken: string): Promise
   // Use the official Supabase Storage API to remove the file
   const filePath = (data as { file_path?: string })?.file_path;
   if (filePath) {
-    try {
-      await supabase.storage.from(STORAGE_BUCKET).remove([filePath]);
-    } catch (storageErr) {
-      console.warn('Storage removal warning:', storageErr);
+    const normalized = filePath.replace(/^assignments\//, '');
+    const pathsToRemove = [filePath, normalized];
+    const { error: storageError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .remove(pathsToRemove);
+
+    if (storageError) {
+      console.warn('Storage removal warning:', storageError);
     }
   }
 

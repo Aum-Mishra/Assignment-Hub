@@ -6,7 +6,9 @@
 -- 2. Secure anonymous ownership: Private secrets table with SHA-256 hash.
 -- 3. Secure deletion RPC: Validates uploader secret before removing DB record
 --    and returning file_path for cleanup via the Supabase Storage API.
--- 4. Configures public download, upload, and delete policies for Supabase Storage.
+-- 4. Orphaned file cleanup: Automatically removes database records if a ZIP
+--    file was deleted from Supabase Storage.
+-- 5. Configures public download, upload, and delete policies for Supabase Storage.
 -- ==============================================================================
 
 -- 1. Enable required PostgreSQL extensions
@@ -76,14 +78,8 @@ CREATE POLICY "Anyone can insert assignment metadata"
         file_path LIKE 'assignments/%'
     );
 
--- NOTE: No UPDATE or DELETE policies are created on public.assignments.
--- Direct REST API UPDATE or DELETE requests are blocked by RLS.
--- Deletions MUST go through the delete_assignment() RPC function with token verification.
-
 -- 6. Row Level Security on private assignment_secrets table
 ALTER TABLE public.assignment_secrets ENABLE ROW LEVEL SECURITY;
--- By enabling RLS and defining NO policies on assignment_secrets,
--- external PostgREST queries cannot view, modify, or delete secrets directly.
 
 -- 7. Secure Stored Procedure: create_assignment
 -- Stores assignment metadata and registers the SHA-256 hash of the deletion secret.
@@ -187,14 +183,34 @@ BEGIN
 END;
 $$;
 
+-- 9. Automatic Cleanup of Orphaned Assignments
+-- If a ZIP file was removed from Supabase Storage directly, this function
+-- cleans up any corresponding database records so they don't linger on the website.
+CREATE OR REPLACE FUNCTION public.clean_orphaned_assignments()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, storage
+AS $$
+BEGIN
+    DELETE FROM public.assignments
+    WHERE file_path NOT IN (
+        SELECT name FROM storage.objects WHERE bucket_id = 'assignments'
+        UNION
+        SELECT 'assignments/' || name FROM storage.objects WHERE bucket_id = 'assignments'
+    );
+END;
+$$;
+
 -- Grant permissions on tables and RPC functions
 GRANT SELECT ON public.assignments TO anon, authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_assignment(TEXT, TEXT, TEXT, BIGINT, TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_assignment(BIGINT, TEXT) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.clean_orphaned_assignments() TO anon, authenticated;
 
 -- ==============================================================================
--- 9. Storage Bucket Configuration & Storage Policies
+-- 10. Storage Bucket Configuration & Storage Policies
 -- ==============================================================================
 
 -- Create or update the 'assignments' public bucket
@@ -239,3 +255,6 @@ CREATE POLICY "Anyone can delete assignment files"
     FOR DELETE
     TO anon, authenticated
     USING (bucket_id = 'assignments');
+
+-- Run immediate cleanup of any existing orphaned rows right now
+SELECT public.clean_orphaned_assignments();
