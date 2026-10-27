@@ -3,7 +3,9 @@ import { Navbar } from './components/Navbar';
 import { AssignmentTable } from './components/AssignmentTable';
 import { UploadModal } from './components/UploadModal';
 import { DeleteModal } from './components/DeleteModal';
-import { RenameModal } from './components/RenameModal';
+import { EditModal } from './components/EditModal';
+import { NotesModal } from './components/NotesModal';
+import { HistoryModal } from './components/HistoryModal';
 import { ViewCodeModal } from './components/ViewCodeModal';
 import { ConfigError } from './components/ConfigError';
 import { configStatus } from './lib/supabase';
@@ -28,7 +30,9 @@ export function App() {
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [deletingAssignment, setDeletingAssignment] = useState<Assignment | null>(null);
-  const [renamingAssignment, setRenamingAssignment] = useState<Assignment | null>(null);
+  const [editingAssignment, setEditingAssignment] = useState<Assignment | null>(null);
+  const [notesAssignment, setNotesAssignment] = useState<Assignment | null>(null);
+  const [historyAssignment, setHistoryAssignment] = useState<Assignment | null>(null);
   const [viewingCodeAssignment, setViewingCodeAssignment] = useState<Assignment | null>(null);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -108,8 +112,22 @@ export function App() {
     setFilteredCount((c) => Math.max(0, c - 1));
   };
 
-  const handleRenameSuccess = (updated: Assignment) => {
+  const handleEditSuccess = (updated: Assignment) => {
     setAssignments((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+  };
+
+  const handleRestoreSuccess = (restored: Assignment) => {
+    setAssignments((prev) => {
+      const exists = prev.some((a) => a.id === restored.id);
+      if (exists) {
+        return prev.map((a) => (a.id === restored.id ? restored : a));
+      }
+      return [restored, ...prev];
+    });
+  };
+
+  const handleNotesUpdated = () => {
+    fetchCatalogue(page, searchQuery, false);
   };
 
   return (
@@ -128,7 +146,9 @@ export function App() {
           searchQuery={searchQuery}
           onSearchChange={handleSearchChange}
           onOpenDelete={(a) => setDeletingAssignment(a)}
-          onOpenRename={(a) => setRenamingAssignment(a)}
+          onOpenEdit={(a) => setEditingAssignment(a)}
+          onOpenNotes={(a) => setNotesAssignment(a)}
+          onOpenHistory={(a) => setHistoryAssignment(a)}
           onOpenViewCode={(a) => setViewingCodeAssignment(a)}
           onLoadMore={handleLoadMore}
           hasMore={hasMore}
@@ -152,12 +172,36 @@ export function App() {
         onDeleteSuccess={handleDeleteSuccess}
       />
 
-      {/* Rename Modal */}
-      <RenameModal
-        assignment={renamingAssignment}
-        isOpen={Boolean(renamingAssignment)}
-        onClose={() => setRenamingAssignment(null)}
-        onRenameSuccess={handleRenameSuccess}
+      {/* Edit Modal (Public for all visitors) */}
+      <EditModal
+        assignment={editingAssignment}
+        isOpen={Boolean(editingAssignment)}
+        onClose={() => setEditingAssignment(null)}
+        onEditSuccess={handleEditSuccess}
+        onOpenNotes={(a) => {
+          setEditingAssignment(null);
+          setNotesAssignment(a);
+        }}
+        onOpenHistory={(a) => {
+          setEditingAssignment(null);
+          setHistoryAssignment(a);
+        }}
+      />
+
+      {/* Notes Modal */}
+      <NotesModal
+        assignment={notesAssignment}
+        isOpen={Boolean(notesAssignment)}
+        onClose={() => setNotesAssignment(null)}
+        onNotesUpdated={handleNotesUpdated}
+      />
+
+      {/* 30-Day Version History & Recovery Modal */}
+      <HistoryModal
+        assignment={historyAssignment}
+        isOpen={Boolean(historyAssignment)}
+        onClose={() => setHistoryAssignment(null)}
+        onRestoreSuccess={handleRestoreSuccess}
       />
 
       {/* View & Copy C Code Modal */}

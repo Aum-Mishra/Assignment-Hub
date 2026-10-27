@@ -10,7 +10,9 @@ import {
   Copy,
   Loader2,
   RotateCcw,
-  Calendar
+  Calendar,
+  FileText,
+  History
 } from 'lucide-react';
 import { Assignment } from '../types/assignment';
 import { formatBytes } from '../lib/validation';
@@ -30,7 +32,9 @@ interface AssignmentTableProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   onOpenDelete: (assignment: Assignment) => void;
-  onOpenRename: (assignment: Assignment) => void;
+  onOpenEdit: (assignment: Assignment) => void;
+  onOpenNotes: (assignment: Assignment) => void;
+  onOpenHistory: (assignment: Assignment) => void;
   onOpenViewCode: (assignment: Assignment) => void;
   onLoadMore: () => void;
   hasMore: boolean;
@@ -47,7 +51,9 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
   searchQuery,
   onSearchChange,
   onOpenDelete,
-  onOpenRename,
+  onOpenEdit,
+  onOpenNotes,
+  onOpenHistory,
   onOpenViewCode,
   onLoadMore,
   hasMore,
@@ -253,6 +259,17 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                                 </span>
                               </button>
                             )}
+
+                            {/* Notes Tab badge/button */}
+                            <button
+                              type="button"
+                              onClick={() => onOpenNotes(assignment)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 font-mono text-[11px] transition-colors"
+                              title="Click to view & manage notes"
+                            >
+                              <FileText className="w-3 h-3 text-amber-600" />
+                              <span>{assignment.notes_count ? `${assignment.notes_count} Notes` : 'Notes'}</span>
+                            </button>
                           </div>
                         </td>
 
@@ -313,13 +330,35 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                               </button>
                             )}
 
-                            {/* Rename */}
+                            {/* Notes button */}
                             <button
                               type="button"
-                              onClick={() => onOpenRename(assignment)}
+                              onClick={() => onOpenNotes(assignment)}
+                              className="p-1 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded transition-colors"
+                              title="Notes (Text, Image, PDF)"
+                              aria-label="Notes"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* 30-Day Version History */}
+                            <button
+                              type="button"
+                              onClick={() => onOpenHistory(assignment)}
+                              className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                              title="30-Day Version History & Restore"
+                              aria-label="30-Day Version History"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Edit (Public) */}
+                            <button
+                              type="button"
+                              onClick={() => onOpenEdit(assignment)}
                               className="p-1 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                              title="Rename assignment"
-                              aria-label="Rename assignment"
+                              title="Edit assignment (public)"
+                              aria-label="Edit assignment"
                             >
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
@@ -391,6 +430,16 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                         </button>
                       )}
 
+                      {/* Notes Badge on Mobile */}
+                      <button
+                        type="button"
+                        onClick={() => onOpenNotes(assignment)}
+                        className="inline-flex items-center gap-1 font-mono text-[11px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 text-amber-800"
+                      >
+                        <FileText className="w-3 h-3 text-amber-600" />
+                        <span>{assignment.notes_count ? `${assignment.notes_count} Notes` : 'Notes'}</span>
+                      </button>
+
                       <span className="flex items-center gap-1 text-[11px]">
                         <Calendar className="w-3 h-3 text-slate-400" />
                         {formatDate(assignment.created_at)}
@@ -447,9 +496,28 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => onOpenRename(assignment)}
+                          onClick={() => onOpenNotes(assignment)}
+                          className="p-1 text-slate-400 hover:text-amber-600 rounded"
+                          title="Notes"
+                          aria-label="Notes"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenHistory(assignment)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 rounded"
+                          title="30-Day Version History"
+                          aria-label="30-Day Version History"
+                        >
+                          <History className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenEdit(assignment)}
                           className="p-1 text-slate-400 hover:text-blue-600 rounded"
-                          aria-label="Rename"
+                          title="Edit (Public)"
+                          aria-label="Edit"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
@@ -457,6 +525,7 @@ export const AssignmentTable: React.FC<AssignmentTableProps> = ({
                           type="button"
                           onClick={() => onOpenDelete(assignment)}
                           className="p-1 text-slate-400 hover:text-rose-600 rounded"
+                          title="Delete"
                           aria-label="Delete"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
